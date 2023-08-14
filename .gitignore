@@ -1,0 +1,7 @@
+*.pyc
+*.csv
+*.txt
+*.dcm
+
+data/*
+output
