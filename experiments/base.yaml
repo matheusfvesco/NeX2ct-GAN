@@ -1,0 +1,36 @@
+# base structure for all experiments
+epochs: 50
+batch_size: 2
+device: cuda:0
+dataset: synthetic # the set to be used, either synthetic, real, or mixed
+save_latest: true # wheter to save the latest or only the best results
+continue: true # wheter to continue training from previous checkpoint or not
+seed: 42
+
+training:
+  fraction: 80
+  lr: 1e-5
+  scheduler_type: linear
+  warmup_scheduler: linear
+  optimizer: adam
+  loss: patches
+
+validation:
+  fraction: 10
+  ckpt_metric: SSIM # or PSNR
+  metric_export_format: csv
+  early_stop: 10 # after X epochs without improving, stop training
+
+test:
+  fraction: 10
+
+generator:
+  arch: convnext
+  layers: 4
+  input_dim: 200
+  ct_dim: 200 # 200 x 200 CT scans
+
+discriminator:
+  arch: convnext
+  layers: 4
+  input_dim: 200
