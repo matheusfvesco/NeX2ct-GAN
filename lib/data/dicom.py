@@ -1,160 +1,338 @@
-"""
-Crawls through the data and returns lists or dictionaries
-for dicom
-
-Finds pairs
-"""
-import os
 from pathlib import Path
-
-from lib.utils.utils import (
-    get_patient_id_from_path,
-    is_same_patient,
-    remove_file_extension,
-    remove_ricord_prefix,
+from tqdm import tqdm
+import random
+from collections import defaultdict
+from lib.dicom import (
+    DicomDirectory,
+    CTScanDirectory,
+    SingleViewXRayDirectory,
+    MultiviewXRayDirectory,
 )
-from lib.utils.dicom import get_folder_modality
-from pprint import pprint
-
-from typing import Dict
-
-
-def group_cts_patient(
-    path, verbose=False
-):  # Returns dict with patient name being the key, with all the CTs for that patient
-    path = Path(path)
-
-    out = {}
-    for dirpath, dirnames, filenames in os.walk(path):
-        # ignores main folder and empty dirs
-        if filenames == []:
-            continue
-        if filenames == ["LICENSE"]:
-            continue
-
-        # gets patient id from path and removes dataset prefix
-        patient_id = remove_ricord_prefix(get_patient_id_from_path(dirpath))
-
-        if patient_id not in out:  # if first ct for patient, creates key with list
-            out[patient_id] = []
-            out[patient_id].append(dirpath)
-        else:  # if not, appends to existing list
-            out[patient_id].append(dirpath)
-
-    if verbose:
-        pprint(out)
-    return out
+from lib.logging import setup_logger
+import os
+import csv
 
 
-def group_xrs_patient(
-    path, verbose=False
-):  # Returns dict with patient name being the key, with all the CTs for that patient
-    path = Path(path)
+class DicomDataset:
+    def __init__(
+        self,
+        root_dir: str | Path,
+        accepted_datasets: list[str] = [
+            "MIDRC-RICORD-1A",
+            "MIDRC-RICORD-1C",
+            "LIDC-IDRI",
+        ],
+        logger=None,
+    ) -> None:
+        self.root_dirpath = Path(root_dir)
+        self.accepted_datasets = accepted_datasets
+        self.dataset = None
+        self.logger = logger if logger is not None else setup_logger("preprocess")
 
-    out = {}
-    for dirpath, dirnames, filenames in os.walk(path):
-        # ignores main folder and empty dirs
-        if filenames == []:
-            continue
-        if filenames == ["LICENSE"]:
-            continue
+    def __iter__(self):
+        return iter(self.dataset.keys())
 
-        # gets patient id from path and removes dataset prefix
-        patient_id = remove_ricord_prefix(get_patient_id_from_path(dirpath))
+    def __getitem__(self, key):
+        return self.dataset[key]
 
-        if patient_id not in out:  # if first ct for patient, creates key with list
-            out[patient_id] = []
-            out[patient_id].append(dirpath)
-        else:  # if not, appends to existing list
-            out[patient_id].append(dirpath)
+    def __setitem__(self, key, value):
+        self.dataset[key] = value
 
-    if verbose:
-        pprint(out)
-    return out
+    def keys(self):
+        return self.dataset.keys()
 
+    @staticmethod
+    def _create_default_patient_dict():
+        return {"xrays": [], "multiview": [], "cts": []}
 
-def group_lidc_patients(path, verbose=False):
-    path = Path(path)
+    def load(self):
+        """
+        Loads the DICOM dataset into memory.
+        """
+        self.logger.info("Creating dataset dictionary...")
+        self.dataset = defaultdict(self._create_default_patient_dict)
 
-    out = {}
-    for dirpath, dirnames, filenames in os.walk(path):
-        # ignores main folder and empty dirs
-        if filenames == []:
-            continue
-        if filenames == ["LICENSE"]:
-            continue
+        datasets_bar = tqdm(self.accepted_datasets)
+        for dataset_name in datasets_bar:
+            datasets_bar.set_description(dataset_name)
+            dataset_path = self.root_dirpath / dataset_name
+            self.logger.debug(f"including data inside '{dataset_path}'...")
+            single_dataset_bar = tqdm(list(os.walk(dataset_path)))
+            for dirpath, dirnames, filenames in single_dataset_bar:
+                single_dataset_bar.set_description(f"{dataset_name}")
+                if not filenames:
+                    continue
+                dcm_paths = list(Path(dirpath).glob("*.dcm"))
+                if not dcm_paths:
+                    continue
+                directory = DicomDirectory(dirpath)
+                patient_id: str = directory.dataset_agnostic_patient_id
+                if directory.is_multiview:
+                    self[patient_id]["multiview"].append(directory)
+                if directory.is_ct:
+                    if directory.is_valid_scan and directory.is_axial:
+                        self.dataset[patient_id]["cts"].append(directory)
+                if directory.is_singleview:
+                    self[patient_id]["xrays"].append(directory)
+            single_dataset_bar.close()
+        self.logger.info("Success!\n\n")
+        datasets_bar.close()
 
-        patient_id = get_patient_id_from_path(dirpath)
+    def filter_dataset(self):
+        """
+        Sorts the datasets based on their number of slices and removes invalid CTs
+        """
+        if not self.dataset:
+            raise ValueError("The dataset haven't been loaded yet")
+        self.logger.info("Filtering invalid CTs and sorting by the amount of slices...")
+        dataset_bar = tqdm(sorted(self.keys()))
+        for patient in dataset_bar:
+            dataset_bar.set_description(patient)
+            if (
+                not self[patient]
+                or self[patient] == self._create_default_patient_dict()
+            ):
+                raise ValueError(f"The dataset {patient} is empty")
+            ct_scans: list[CTScanDirectory] = self[patient]["cts"]
+            singleview_dirs: list[SingleViewXRayDirectory] = self[patient]["xrays"]
+            multiview_dirs: list[MultiviewXRayDirectory] = self[patient]["multiview"]
 
-        if patient_id not in out:  # if first ct for patient, creates key with list
-            out[patient_id] = {"cts": [], "xrs": []}
-            if get_folder_modality(dirpath) != "CT":
-                out[patient_id]["xrs"].append(dirpath)
-            else:
-                out[patient_id]["cts"].append(dirpath)
-        else:  # if not, appends to existing list
-            if get_folder_modality(dirpath) != "CT":
-                out[patient_id]["xrs"].append(dirpath)
-            else:
-                out[patient_id]["cts"].append(dirpath)
-    if verbose:
-        pprint(out)
-    return out
+            if singleview_dirs:
+                self[patient]["xrays"] = singleview_dirs = sorted(
+                    singleview_dirs, key=lambda x: len(x), reverse=True
+                )
+                self[patient]["xrays"] = singleview_dirs = [
+                    singleview for singleview in singleview_dirs
+                ]
 
+            if ct_scans:
+                self[patient]["cts"] = ct_scans = sorted(
+                    ct_scans, key=lambda x: len(x), reverse=True
+                )
+                self[patient]["cts"] = ct_scans = [
+                    ct_scan for ct_scan in ct_scans if ct_scan.is_valid_scan
+                ]
 
-def filter_paired(original: Dict):
-    """
-    Returns original dict and a dict with only paired data
-    """
-    out = {}  # should have 290 patients with paired data for lidc and 64 for ricord
-    for key in original:
-        if original[key]["cts"] != [] and original[key]["xrs"] != []:
-            out[key] = original[key]
-    return original, out
+            if multiview_dirs:
+                self[patient]["multiview"] = multiview_dirs = sorted(
+                    multiview_dirs, key=lambda x: len(x), reverse=True
+                )
+                self[patient]["multiview"] = multiview_dirs = [
+                    multiview for multiview in multiview_dirs
+                ]
+        self.logger.info("Success!\n\n")
+        dataset_bar.close()
 
+    def clear_cache(self):
+        for patient in self:
+            for key in self[patient]:
+                for dir in self[patient][key]:
+                    dir.cache.clear()
 
-def filter_cts():  # For a given patient, drops any CTs that don't follow the filter. Returns original and filtered
-    pass
+    def write_summary(self, save_path="preprocess_data_summary.csv"):
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
 
+        data_summary = []
+        for patient in self:
+            ct_scans: list[CTScanDirectory] = self[patient]["cts"]
+            singleview_dirs: list[SingleViewXRayDirectory] = self[patient]["xrays"]
+            multiview_dirs: list[MultiviewXRayDirectory] = self[patient]["multiview"]
+            data_summary.append(
+                {
+                    "patient": patient,
+                    "total_number_of_cts": len(ct_scans),  # CTs
+                    "number_of_valid_cts": len(
+                        [x for x in ct_scans if x.is_valid_scan]
+                    ),
+                    "number_of_valid_axial_cts": len(
+                        [x for x in ct_scans if x.is_valid_axial_scan]
+                    ),
+                    "number_of_axial_cts": len([x for x in ct_scans if x.is_axial]),
+                    # singleviews
+                    "total_number_of_singleview_xrays": len(singleview_dirs),
+                    "number_of_frontal_singleview_xrays": len(
+                        [x for x in singleview_dirs if x.is_frontal]
+                    ),
+                    "number_of_lateral_singleview_xrays": len(
+                        [x for x in singleview_dirs if x.is_lateral]
+                    ),
+                    # multiviews
+                    "total_number_of_multiview_xrays": len(multiview_dirs),
+                    "number_of_both_views_available_multiview_xrays": len(
+                        [x for x in multiview_dirs if x.has_both_views]
+                    ),
+                    "number_of_frontal_multiview_xrays": len(
+                        [x for x in multiview_dirs if x.has_frontal]
+                    ),
+                    "number_of_lateral_multiview_xrays": len(
+                        [x for x in multiview_dirs if x.has_lateral]
+                    ),
+                    "is_paired_patient": True
+                    if ct_scans and (singleview_dirs or multiview_dirs)
+                    else False,
+                }
+            )
 
-def filter_xrs():  # For a given patient, drops any XRs that don't follow the filter
-    pass
+        with open(save_path, "w") as f:
+            writer = csv.DictWriter(
+                f=f, fieldnames=data_summary[0].keys(), delimiter=";"
+            )
+            writer.writeheader()
+            writer.writerows(data_summary)
 
+    def write_counts(self, save_path="modality_counts.csv"):
+        counts = defaultdict(int)
+        for patient in self:
+            counts["total_patients"] += 1
+            ct_scans: list[CTScanDirectory] = self[patient]["cts"]
+            singleview_dirs: list[SingleViewXRayDirectory] = self[patient]["xrays"]
+            multiview_dirs: list[MultiviewXRayDirectory] = self[patient]["multiview"]
 
-def merge_patient_exams(
-    ct_dirs, xr_dirs
-):  # Takes the two dicts and merges CTs and XRs data for that patient, returning dict with all patients and their exams
-    out = {}
-    for patient in ct_dirs:
-        out[patient] = {"cts": ct_dirs[patient], "xrs": []}
-    for patient in xr_dirs:
-        if patient in out:
-            out[patient]["xrs"] = xr_dirs[patient]
-        else:
-            out[patient] = {"cts": [], "xrs": xr_dirs[patient]}
-    """out = {}
-    for key in ct_dirs:
-        if key in xr_dirs:
-            out[key] = {"cts": ct_dirs[key], "xrs": xr_dirs[key]}
-        else:
-            out[key] = {"cts": ct_dirs[key], "xrs": []}
-    for key in xr_dirs:
-        if key in xr_dirs:
-            continue
-        else:
-            out[key] = {"cts": [], "xrs": xr_dirs[key]}"""
+            if ct_scans and (singleview_dirs or multiview_dirs):
+                counts["paired_patients"] += 1
 
-    # pprint(out)
-    # print(len(out))
-    return out
+            if singleview_dirs or multiview_dirs:
+                counts["at_least_one_xray"] += 1
+                if singleview_dirs and multiview_dirs:
+                    counts["has_singleview_and_multiview"] += 1
 
+                if len(singleview_dirs) > 1:
+                    counts["more_than_one_singleview"] += 1
 
-def filter_paired_ricord(original: Dict):
-    """
-    Returns original dict and a dict with only paired data
-    """
-    out = {}
-    for key in original:
-        if original[key]["cts"] != [] and original[key]["xrs"] != []:
-            out[key] = original[key]
-    return original, out
+                if len(multiview_dirs) > 1:
+                    counts["more_than_one_multiview"] += 1
+
+            if ct_scans:
+                counts["at_least_one_ct"] += 1
+                if len(ct_scans) > 1:
+                    counts["more_than_one_CT"] += 1
+
+            if ct_scans and "LIDC-IDRI" in ct_scans[0].dataset:
+                counts["LIDC_IDRI_CT_scans"] += 1
+
+            if ct_scans and "LIDC-IDRI" not in ct_scans[0].dataset:
+                counts["RICORD_CT_scans"] += 1
+
+            if (
+                ct_scans
+                and (singleview_dirs or multiview_dirs)
+                and "LIDC-IDRI" in ct_scans[0].dataset
+            ):
+                counts["LIDC_IDRI_paired_patients"] += 1
+
+            if (
+                ct_scans
+                and (singleview_dirs or multiview_dirs)
+                and "LIDC-IDRI" not in ct_scans[0].dataset
+            ):
+                counts["RICORD_paired_patients"] += 1
+
+        # Save counts to CSV file
+        with open(save_path, "w", newline="") as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(["Count Type", "Count"])
+            for count_type, count in counts.items():
+                writer.writerow([count_type, count])
+
+    def get_demo_subset_names(
+        self, seed=42, sample_size_porcentage=10, ensure_upside_down_cases=True
+    ):
+        """
+        Returns a list of patient ids that have at least one paired CT scan.
+        Use it to iterate over the dataset object and do any kind of transformation
+        """
+        if ensure_upside_down_cases:
+            # found using the logic of CtScanDirectory._is_reversed and hard coded for run efficiency
+            upside_down_cases = [
+                "419639-000831",
+                "419639-001155",
+                "419639-001336",
+                "419639-001533",
+                "LIDC-IDRI-0052",
+                "LIDC-IDRI-0067",
+                "LIDC-IDRI-0082",
+                "LIDC-IDRI-0083",
+                "LIDC-IDRI-0091",
+                "LIDC-IDRI-0099",
+                "LIDC-IDRI-0109",
+                "LIDC-IDRI-0114",
+                "LIDC-IDRI-0123",
+                "LIDC-IDRI-0125",
+                "LIDC-IDRI-0129",
+                "LIDC-IDRI-0131",
+                "LIDC-IDRI-0133",
+                "LIDC-IDRI-0155",
+                "LIDC-IDRI-0161",
+                "LIDC-IDRI-0164",
+                "LIDC-IDRI-0168",
+                "LIDC-IDRI-0169",
+                "LIDC-IDRI-0170",
+                "LIDC-IDRI-0176",
+                "LIDC-IDRI-0180",
+                "LIDC-IDRI-0192",
+                "LIDC-IDRI-0199",
+                "LIDC-IDRI-0207",
+                "LIDC-IDRI-0211",
+                "LIDC-IDRI-0220",
+                "LIDC-IDRI-0223",
+                "LIDC-IDRI-0249",
+                "LIDC-IDRI-0264",
+                "LIDC-IDRI-0266",
+                "LIDC-IDRI-0278",
+                "LIDC-IDRI-0280",
+                "LIDC-IDRI-0288",
+                "LIDC-IDRI-0399",
+                "LIDC-IDRI-0470",
+                "LIDC-IDRI-0485",
+                "LIDC-IDRI-0715",
+                "LIDC-IDRI-0760",
+                "LIDC-IDRI-0818",
+                "LIDC-IDRI-0879",
+                "LIDC-IDRI-1010",
+                "SITE2-000037",
+                "SITE2-000105",
+            ]
+        sample_size_decimal = int(sample_size_porcentage) / 100
+        random.seed(seed)
+        # finds patients with CTs and xrays
+        paired_patients = [
+            patient
+            for patient in self
+            if self[patient]["cts"]
+            and (self[patient]["xrays"] or self[patient]["multiview"])
+        ]
+        # filters only patients with CTs scans
+        patients_with_cts = [
+            patient
+            for patient in self
+            if patient not in paired_patients and self[patient]["cts"]
+        ]
+        if ensure_upside_down_cases:
+            upside_down_cases = [
+                patient
+                for patient in upside_down_cases
+                if patient not in paired_patients and patient not in patients_with_cts
+            ]
+
+        # Randomly select N% of patients from patients_with_cts and paired_patients
+        num_to_select_cts = int(sample_size_decimal * len(patients_with_cts))
+        num_to_select_paired = int(sample_size_decimal * len(paired_patients))
+        if ensure_upside_down_cases:
+            num_to_select_upside_down = int(
+                sample_size_decimal * len(upside_down_cases)
+            )
+
+        random_patients_cts = random.sample(patients_with_cts, num_to_select_cts)
+        random_patients_paired = random.sample(paired_patients, num_to_select_paired)
+        if ensure_upside_down_cases:
+            random_patients_upside_down = random.sample(
+                upside_down_cases, num_to_select_upside_down
+            )
+
+        selected_patients = random_patients_cts + random_patients_paired
+        if ensure_upside_down_cases:
+            selected_patients += random_patients_upside_down
+
+        selected_patients = sorted(selected_patients)
+        return selected_patients
