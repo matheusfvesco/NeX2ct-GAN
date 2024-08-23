@@ -1,7 +1,17 @@
 *.pyc
 *.csv
-*.txt
 *.dcm
+*.pdf
+*.html
+*.txt
+*.egg-info
+*.log
+!requirements.txt
 
-data/*
-output
+/data
+/output
+/models
+/GENERAL-TESTS.ipynb
+
+.ruff_cache
+.hypothesis
