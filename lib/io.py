@@ -189,7 +189,7 @@ class PatientDataStorer:
         lateral_drr = drr_generator.lateral_view
 
         # creates lists containing frontal and lateral views of the x-rays
-        singlewview_frontals = [
+        singleview_frontals = [
             singleview
             for singleview in singleview_dirs
             if singleview.view_type == "frontal"
@@ -206,8 +206,8 @@ class PatientDataStorer:
         if singleview_dirs or multiview_dirs:
             pass
 
-        if singlewview_frontals:
-            frontal_xray = singlewview_frontals[0].get_view().get_array()
+        if singleview_frontals:
+            frontal_xray = singleview_frontals[0].get_view().get_array()
         if singlewview_laterals:
             lateral_xray = singlewview_laterals[0].get_view().get_array()
         # decides to use either multiview dir or singleview dir for xrays
