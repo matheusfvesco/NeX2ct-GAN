@@ -147,6 +147,7 @@ class XRayProcessor(BaseProcessor):
         self._apply_photometric()
         # self._apply_window_to_array()
         # self._set_max_to_min()
+        self._normalize()
 
         return self.array
 
@@ -432,10 +433,17 @@ class CTProcessor(BaseProcessor):
             )
     
     def _resize(self):
+        """
+        Resizes de number of slices to 100 slices. If there are more slices,
+        resize using one of the axis. If there are less than 100 slices, add
+        padding.
+        """
         if self.array.shape[-1] > 100:
+            # resizes
             slcs = [cv2.resize(slc,(100, 512)) for slc in self.array]
             self.array = np.stack(slcs)
         else:
+            # adds padding
             diff = 100 - self.array.shape[-1]
             top = (diff // 2) + (diff % 2)
             bottom = diff // 2

@@ -9,6 +9,7 @@ import h5py
 import numpy as np
 
 from typing import TYPE_CHECKING
+from lib.process.preprocess import CTProcessor
 
 if TYPE_CHECKING:
     from lib.dicom import (
@@ -183,7 +184,6 @@ class PatientDataStorer:
         multiview_dirs: list[MultiviewXRayDirectory] = self.data_dictionary["multiview"]
 
         ct_scan = ct_scans[0]
-        ct_volume = ct_scan.get_array()
         drr_generator = ct_scan.drr_generator
         frontal_drr = drr_generator.frontal_view
         lateral_drr = drr_generator.lateral_view
@@ -240,6 +240,15 @@ class PatientDataStorer:
         h5f = HDF5FileHandler(
             filepath=dirpath / (self.patient_id + ".hdf5"), compression=compression
         )
+
+        # gets array with N slices
+        ct_volume = ct_scan.get_array()
+
+        # resizes the CT volumes to standard number of slices
+        ct_volume = CTProcessor(ct_volume, None)
+        ct_volume._resize()
+        ct_volume = ct_volume.array
+
         h5f.store_array("ct", ct_volume)
         h5f.store_array("frontal_drr", frontal_drr)
         h5f.store_array("lateral_drr", lateral_drr)
