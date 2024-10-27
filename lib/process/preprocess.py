@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 from abc import ABC
+import cv2
 
 
 from typing import TYPE_CHECKING
@@ -313,6 +314,7 @@ class CTProcessor(BaseProcessor):
         self._rescale()
         self._set_max_to_min()
         self._normalize()
+        #self._resize()
 
         return self.array
 
@@ -428,3 +430,18 @@ class CTProcessor(BaseProcessor):
             raise ValueError(
                 "Window center and width are not set. Cannot apply windowing."
             )
+    
+    def _resize(self):
+        if self.array.shape[-1] > 100:
+            slcs = [cv2.resize(slc,(100, 512)) for slc in self.array]
+            self.array = np.stack(slcs)
+        else:
+            diff = 100 - self.array.shape[-1]
+            top = (diff // 2) + (diff % 2)
+            bottom = diff // 2
+            for i in range(top):
+                self.array = np.insert(self.array,-1, np.zeros((512,512)),axis=2)
+            for i in range(bottom):
+                self.array = np.insert(self.array,0, np.zeros((512,512)),axis=2)
+        if self.array.shape[-1] != 100:
+            raise ValueError("Shape is different than 100")
