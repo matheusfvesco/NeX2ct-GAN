@@ -194,7 +194,7 @@ class PatientDataStorer:
             for singleview in singleview_dirs
             if singleview.view_type == "frontal"
         ]
-        singlewview_laterals = [
+        singleview_laterals = [
             singleview
             for singleview in singleview_dirs
             if singleview.view_type == "lateral"
@@ -208,8 +208,8 @@ class PatientDataStorer:
 
         if singleview_frontals:
             frontal_xray = singleview_frontals[0].get_view().get_array()
-        if singlewview_laterals:
-            lateral_xray = singlewview_laterals[0].get_view().get_array()
+        if singleview_laterals:
+            lateral_xray = singleview_laterals[0].get_view().get_array()
         # decides to use either multiview dir or singleview dir for xrays
         # prefers using multiview if any of the directories have both views
         if multiview_dirs:
