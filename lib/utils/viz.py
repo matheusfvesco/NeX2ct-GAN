@@ -91,6 +91,7 @@ class ArrayDisplayUtility:
         complete_array: bool = True,
         extension: str = ".jpeg",
         thumbnail: int | tuple[int, int] | None = None,
+        axis: int = 0,
     ):
         """
         Writes both 2D Arrays and 3D Arrays to disk.
@@ -112,6 +113,7 @@ class ArrayDisplayUtility:
                 complete_array=complete_array,
                 extension=extension,
                 thumbnail=thumbnail,
+                axis=axis,
             )
         else:
             self._write_2d_to_disk(path=path, thumbnail=thumbnail)
@@ -208,9 +210,15 @@ class ArrayDisplayUtility:
         complete_array: bool,
         extension: str,
         thumbnail: tuple[int, int],
+        axis: int,
     ):
         write_gif = self._path_is_gif(path=path)
         is_file = self._is_file(path=path)
+        transpose = {
+            0: (0, 1, 2),
+            1: (1, 0, 2),
+            2: (2, 0, 1),
+        }
         if complete_array and write_gif and is_file:
             self._write_images_as_gif(path=path, thumbnail=thumbnail)
         elif complete_array and not write_gif and not is_file:
@@ -218,7 +226,7 @@ class ArrayDisplayUtility:
                 path=path, extension=extension, thumbnail=thumbnail
             )
         elif not complete_array and not write_gif and is_file:
-            self._write_single_slice_to_disk(path=path, thumbnail=thumbnail)
+            self._write_single_slice_to_disk(path=path, thumbnail=thumbnail, transpose=transpose[axis])
         else:
             raise ValueError(
                 f"""complete_array must be a bool, and path
@@ -291,12 +299,14 @@ class ArrayDisplayUtility:
                     print(f"Exception occurred during image writing: {e}")
 
     def _write_single_slice_to_disk(
-        self, path: Path, thumbnail: tuple[int, int] | None, index: int | str = "middle"
+        self, path: Path, thumbnail: tuple[int, int] | None, transpose: tuple[int, int, int], index: int | str = "middle"
     ):
         """
         Write a single slice of the 3D array to disk on the specified
         """
         array = self.normalized_array
+        if transpose != (0, 1, 2):
+            array = array.transpose(transpose)
 
         # Determine which slice to write
         if index == "middle":
