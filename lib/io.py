@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 class HDF5FileHandler:
     def __init__(
-        self, filepath: str | Path, mode: str = "auto", compression: str | int = 0
+        self, filepath: str | Path, mode: str = "auto", compression: str | int = "lzf"
     ) -> None:
         """
         compression:
@@ -90,7 +90,7 @@ class HDF5FileHandler:
     def close(self) -> None:
         self.file.close()
 
-    def store_array(self, key: str, array: np.ndarray, force=False):
+    def store_array(self, key: str, array: np.ndarray, force: bool = False):
         if not self.is_writable and not force:
             raise ValueError(
                 "The file is opened in read only mode, use 'force=True' to open it anyway"
@@ -103,7 +103,56 @@ class HDF5FileHandler:
                 self._open_in_mode("write")
         if key in self.file:
             del self.file[key]
-        self.file.create_dataset(key, data=array)
+        self.file.create_dataset(key, data=array, compression=self.compression)
+    
+    def store_dict(self, key: str, dict: dict, force: bool = False):
+        if not self.is_writable and not force:
+            raise ValueError(
+                "The file is opened in read only mode, use 'force=True' to open it anyway"
+            )
+        if not self.is_writable and force:
+            self.close()
+            if self.exists:
+                self._open_in_mode("append")
+            else:
+                self._open_in_mode("write")
+        if key in self.file:
+            del self.file[key]
+    
+        # Create a group for the top-level key
+        group = self.file.create_group(key)
+
+        # recursively creates entires for each dict key and value
+        self._store_nested_dict(group, dict)
+
+    def _store_nested_dict(self, hdf5_group, data):
+        for sub_key, value in data.items():
+            if isinstance(value, dict):
+                subgroup = hdf5_group.create_group(sub_key)
+                self._store_nested_dict(subgroup, value)
+            else:
+                # Store non-dict items as datasets
+                hdf5_group.create_dataset(sub_key, data=value)
+
+    def read_dict(self, key: str) -> dict:
+        if key not in self.file:
+            raise KeyError(f"No data found for key '{key}'")
+        group = self.file[key]
+        return self._load_nested_dict(group)
+
+    def _load_nested_dict(self, hdf5_group):
+        result = {}
+        for sub_key, item in hdf5_group.items():
+            if isinstance(item, h5py.Group):
+                # Recursively load subgroups
+                result[sub_key] = self._load_nested_dict(item)
+            else:
+                # Load datasets directly
+                out = item[()]
+                if isinstance(out, bytes):
+                    out = out.decode("utf-8")
+                result[sub_key] = out  # Retrieve the dataset value
+        return result
 
     def retrieve_array(self, key: str) -> np.ndarray:
         return np.array(self.file[key])
@@ -173,11 +222,12 @@ class PatientDataStorer:
                 multiview for multiview in multiview_dirs
             ]
 
-    def store_to_file(self, dirpath: str | Path, compression: str | int = 0):
+    def store_to_file(self, dirpath: str | Path, compression: str | int = "lzf"):
         """
         compression:
             (String or int) Compression strategy. Legal values are 'gzip', 'szip', 'lzf'. If an integer in range(10), this indicates gzip compression level. Otherwise, an integer indicates the number of a dynamically loaded compression filter.
         """
+        age = None
         dirpath = Path(dirpath)
         ct_scans: list[CTScanDirectory] = self.data_dictionary["cts"]
         singleview_dirs: list[SingleViewXRayDirectory] = self.data_dictionary["xrays"]
@@ -208,8 +258,12 @@ class PatientDataStorer:
 
         if singleview_frontals:
             frontal_xray = singleview_frontals[0].get_view().get_array()
+            if age is None or age == "":
+                age = singleview_frontals[0].dicom.dicom.get("PatientAge")
         if singleview_laterals:
             lateral_xray = singleview_laterals[0].get_view().get_array()
+            if age is None or age == "":
+                age = singleview_laterals[0].dicom.dicom.get("PatientAge")
         # decides to use either multiview dir or singleview dir for xrays
         # prefers using multiview if any of the directories have both views
         if multiview_dirs:
@@ -222,8 +276,12 @@ class PatientDataStorer:
                 lateral_view = multiviews_with_both_views[0].get_by_view_type("lateral")
                 if frontal_view is not None:
                     frontal_xray = frontal_view.get_array()
+                    if age is None or age == "":
+                        age = frontal_view.dicom.get("PatientAge")
                 if lateral_view is not None:
                     lateral_xray = lateral_view.get_array()
+                    if age is None or age == "":
+                        age = lateral_view.dicom.get("PatientAge")
             else:
                 # handle the case where there are no directories with both views
                 frontal_view = multiview_dirs[0].get_by_view_type(
@@ -234,8 +292,12 @@ class PatientDataStorer:
                 )  # may be None
                 if frontal_view:
                     frontal_xray = frontal_view.get_array()
+                    if age is None or age == "":
+                        age = frontal_view.dicom.get("PatientAge")
                 if lateral_view:
                     lateral_xray = lateral_view.get_array()
+                    if age is None or age == "":
+                        age = lateral_view.dicom.get("PatientAge")
 
         h5f = HDF5FileHandler(
             filepath=dirpath / (self.patient_id + ".hdf5"), compression=compression
@@ -249,9 +311,21 @@ class PatientDataStorer:
         ct_volume._resize()
         ct_volume = ct_volume.array
 
+        metadata = {}
+        dcm = ct_scan.dicom.dicom
+        if age is None or age == "":
+            age = dcm.get("PatientAge")
+
+        age = age if age is not None else "000Y"
+        age = age if age else "000Y"
+        metadata["age"] = age.replace("Y", "")
+        metadata["slice_thickness"] = str(dcm.get("SliceThickness"))
+        metadata["acquisition_date"] = str(dcm.get("AcquisitionDate"))
+
         h5f.store_array("ct", ct_volume)
         h5f.store_array("frontal_drr", frontal_drr)
         h5f.store_array("lateral_drr", lateral_drr)
+        h5f.store_dict("metadata", metadata)
         if frontal_xray is not None:
             h5f.store_array("frontal_xray", frontal_xray)
         if lateral_xray is not None:
