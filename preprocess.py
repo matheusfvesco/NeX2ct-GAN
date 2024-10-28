@@ -272,7 +272,7 @@ for patient in dataset:
     logger.debug("Writing patient data to disk...")
     PatientDataStorer(
         patient_id=patient, patient_data_dictionary=dataset[patient]
-    ).store_to_file(dirpath=SAVE_ROOT, compression=9)
+    ).store_to_file(dirpath=SAVE_ROOT, compression="lzf")
     logger.debug("Finished writing patient data to disk.")
 
     logger.debug("Clearing cache...")
