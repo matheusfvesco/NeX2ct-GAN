@@ -6,12 +6,16 @@
 *.txt
 *.egg-info
 *.log
+# tensorboard
+*.tfevents*
 !requirements.txt
 
 /data
 /output
 /models
 /GENERAL-TESTS.ipynb
+/intermediary_outputs
+/preprocess
 
 .ruff_cache
 .hypothesis

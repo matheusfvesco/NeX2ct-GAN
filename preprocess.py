@@ -26,7 +26,7 @@ logger = setup_logger(
 )
 
 DATA_ROOT = Path("data")
-SAVE_ROOT = Path("output/preprocess/GAN-dataset")
+SAVE_ROOT = Path("preprocess/GAN-dataset")
 DATASETS = ["MIDRC-RICORD-1A", "MIDRC-RICORD-1C", "LIDC-IDRI"]
 
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)

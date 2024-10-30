@@ -13,7 +13,8 @@
 	// 2. Use 'mounts' to make a list of local directories available inside the container. More info: https://code.visualstudio.com/remote/advancedcontainers/add-local-file-mount
 	"mounts": [
         "source=${localEnv:HOME}/HDD-home/datasets,target=/data,type=bind,consistency=cached",
-        "source=${localEnv:HOME}/HDD-home/outputs,target=/outputs,type=bind,consistency=cached"
+        "source=${localEnv:HOME}/HDD-home/outputs,target=/outputs,type=bind,consistency=cached",
+		"source=${localEnv:HOME}/Data,target=/ssd,type=bind,consistency=cached"
     ],
 
 	// 3. Use 'runArgs' to pass arguments to the container. 

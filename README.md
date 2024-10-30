@@ -76,7 +76,7 @@ To preprocess the dataset, run
 python preprocess.py
 ```
 
-This should create multiple h5 files located at `output/preprocess/GAN-dataset`.
+This should create multiple h5 files located at `preprocess/GAN-dataset`.
 
 ### 2. Training
 
