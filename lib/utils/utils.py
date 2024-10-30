@@ -3,10 +3,13 @@ More general utilities, like string formatting
 """
 
 import math
+import torch
 from pathlib import Path
 
 from pydicom.multival import MultiValue
 from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
 import re
 
 
@@ -321,3 +324,84 @@ class UniquePathGenerator:
     def _build_name_template(self, file: str, number: int):
         name_template = file.replace(str(number), "{unique}")
         return name_template
+
+class SingleDataStorer:
+    def __init__(self, max_points: int = 0):
+        self.data: list = []
+
+    def store(self, item):
+        self.data.append(item)
+
+    def plot(self, xlabel, ylabel, title, style = "darkgrid", figsize = (10,10)):
+        """
+        Uses seaborn styles to create a plot of the stored data.
+        
+        Parameters:
+        style (str): The seaborn style to use for plotting. Can bo one of: 'white', 'dark', 'whitegrid', 'darkgrid', 'ticks'
+
+        Returns:
+        plt (matplotlib.pyplot): The plot object.
+        """
+        sns.set_style(style)  # Set seaborn style
+        plt.figure(figsize=figsize)
+        
+        sns.lineplot(x=range(len(self.data)), y=self.data, marker='o')
+        
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        
+        return plt
+
+    def pop(self, index: int =-1):
+        return self.data.pop(index)
+    
+    def mean(self):
+        return torch.tensor(self.data).mean()
+
+    def __len__(self):
+        return len(self.data)
+
+    def __iter__(self):
+        return iter(self.data)
+
+class DataStorer:
+    def __init__(self):
+        self.data: dict[str, SingleDataStorer] = {}
+
+    def store(self, tag, item):
+        if tag not in self.data:
+            self.data[tag] = SingleDataStorer()
+        self.data[tag].store(item)
+    
+    def plot(self, xlabel, ylabel, title, tags=None, style="darkgrid", figsize=(10, 10)):
+        """
+        Plots the data stored in specified columns (tags).
+        
+        Parameters:
+        xlabel (str): Label for the X-axis.
+        ylabel (str): Label for the Y-axis.
+        title (str): Title of the plot.
+        tags (list): List of tags to plot. If None, plots all available tags.
+        style (str): Seaborn style to use for plotting.
+        figsize (tuple): Size of the plot figure.
+        
+        Returns:
+        plt (matplotlib.pyplot): The plot object.
+        """
+        sns.set_style(style)
+        plt.figure(figsize=figsize)
+
+        if tags is None:
+            tags = list(self.data.keys())
+        
+        # Plot each selected tag's data
+        for tag in tags:
+            sns.lineplot(x=range(len(self.data[tag].data)), y=self.data[tag].data, marker='o', label=tag)
+
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title)
+        plt.legend()
+        
+        return plt
