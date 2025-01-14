@@ -11,6 +11,7 @@ from datetime import datetime
 import matplotlib.pyplot as plt
 import seaborn as sns
 import re
+import polars as pl
 
 
 def get_multival_by_index(value: MultiValue, index: int = 0) -> float:
@@ -330,6 +331,9 @@ class SingleDataStorer:
         self.data: list = []
 
     def store(self, item):
+        if isinstance(item, torch.Tensor):
+            item = item.clone().to("cpu").detach().numpy()
+            item = float(item)
         self.data.append(item)
 
     def plot(self, xlabel, ylabel, title, style = "darkgrid", figsize = (10,10)):
@@ -405,3 +409,18 @@ class DataStorer:
         plt.legend()
         
         return plt
+
+    def write_csv(self, path: str):
+        """
+        Writes the stored data to a CSV file.
+        
+        Parameters:
+        path (str): Path to save the CSV file.
+        """
+        # converts data from dict of SingleDataStorer to dict of lists
+        data = {tag: self.data[tag].data for tag in self.data}
+
+        # Create a DataFrame from the stored data
+        df = pl.DataFrame(data)
+        # Write the DataFrame to a CSV file
+        df.write_csv(path, separator="\t")
