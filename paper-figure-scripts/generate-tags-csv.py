@@ -52,7 +52,7 @@ def get_dicom_files(start_path: Path) -> list[Path]:
 def write_dicom_tags_to_csv(
     dicom_tags_results: list[tuple],
     all_tags: set,
-    output_dir="output/preprocess",
+    output_dir="preprocess",
     output_filename="dicom_tags.csv",
 ):
     csv_filepath = Path(output_dir) / output_filename
@@ -79,7 +79,7 @@ def write_dicom_tags_to_csv(
 
 def write_tags_keywords_to_json(
     dicom_tags_results: list[tuple],
-    output_dir="output/preprocess",
+    output_dir="preprocess",
     output_filename="dicom_keywords.json",
 ):
     # Combine keywords from all files
