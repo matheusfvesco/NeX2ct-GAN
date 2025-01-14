@@ -18,18 +18,19 @@ def main(args):
     for root, _, files in os.walk(source_folder, followlinks=True):
         for file in files:
             for prefix in prefixes:
-                if file.startswith(prefix):
-                    src_file_path = Path(root) / file
+                if not file.startswith(prefix):
+                    continue
+                src_file_path = Path(root) / file
 
-                    relative_path = src_file_path.relative_to(source_folder)
-                    dest_file_path = destination_folder / prefix / relative_path
+                relative_path = src_file_path.relative_to(source_folder)
+                dest_file_path = destination_folder / prefix / relative_path
 
-                    dest_dir = dest_file_path.parent
+                dest_dir = dest_file_path.parent
 
-                    dest_dir.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src_file_path, dest_file_path, follow_symlinks=True)
-                    print(f"Copied {src_file_path} to {dest_file_path}")
-                    break
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src_file_path, dest_file_path, follow_symlinks=True)
+                print(f"Copied {src_file_path} to {dest_file_path}")
+                break
 
 
 if __name__ == "__main__":
