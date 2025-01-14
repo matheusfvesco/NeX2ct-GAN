@@ -6,11 +6,6 @@ and generates images visualizing the results. The output is saved in a directory
 with subdirectories representing different processing orders and unordered versions.
 """
 
-import sys
-import os
-
-# sys.path.insert(1, os.path.abspath("."))
-
 from lib.dicom import (
     CTScanDirectory,
     SingleViewXRayDirectory,
@@ -32,6 +27,7 @@ def main(args):
     random.seed(args.seed)
     DATA_ROOT = Path(args.input)
     SAVE_ROOT = Path(args.output)
+    SAVE_ROOT.mkdir(parents=True, exist_ok=True)
     main_progress_bar = tqdm(range(4))
     THUMBNAIL_SIZE = args.thumbnail_size if args.thumbnail_size else None
     FULL_UNORDERED = args.full_unordered_samples
