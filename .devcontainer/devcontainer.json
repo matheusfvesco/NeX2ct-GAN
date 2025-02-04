@@ -20,8 +20,12 @@
 	// 3. Use 'runArgs' to pass arguments to the container. 
 	// run the container with all GPUs
 	"runArgs": [
-		"--gpus",
-		"all"
+		"--gpus=all",
+		"--shm-size=1g",
+		"--ulimit",
+		"memlock=-1",
+		"--ulimit",
+		"stack=67108864"
 	],
 
 	// 4. Features to add to the Dev Container. More info: https://containers.dev/implementors/features.
