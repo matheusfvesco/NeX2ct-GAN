@@ -438,6 +438,14 @@ class CTProcessor(BaseProcessor):
         resize using one of the axis. If there are less than 100 slices, add
         padding.
         """
+        # resizes to 100 slices
+        slcs = [cv2.resize(slc,(100, 512)) for slc in self.array]
+        self.array = np.stack(slcs)
+        if self.array.shape[-1] != 100:
+            raise ValueError("Shape is different than 100")
+        return
+
+        # resizes to 100 slices if > 100 slices, else add padding
         if self.array.shape[-1] > 100:
             # resizes
             slcs = [cv2.resize(slc,(100, 512)) for slc in self.array]

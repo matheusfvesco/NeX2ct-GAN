@@ -307,6 +307,8 @@ class PatientDataStorer:
         ct_volume = ct_scan.get_array()
 
         # resizes the CT volumes to standard number of slices
+        # if resizing made during preprocess, pixel spacing would be wrong during
+        # drr generation
         ct_volume = CTProcessor(ct_volume, None)
         ct_volume._resize()
         ct_volume = ct_volume.array
