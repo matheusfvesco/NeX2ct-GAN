@@ -300,7 +300,7 @@ class PatientDataStorer:
                         age = lateral_view.dicom.get("PatientAge")
 
         h5f = HDF5FileHandler(
-            filepath=dirpath / (self.patient_id + ".hdf5"), compression=compression
+            filepath=dirpath / (self.patient_id + ".h5"), compression=compression
         )
 
         # gets array with N slices
@@ -310,7 +310,7 @@ class PatientDataStorer:
         # if resizing made during preprocess, pixel spacing would be wrong during
         # drr generation
         ct_volume = CTProcessor(ct_volume, None)
-        ct_volume._resize()
+        #ct_volume._resize() # keep same size, resize during training (trilinear)
         ct_volume = ct_volume.array
 
         metadata = {}
