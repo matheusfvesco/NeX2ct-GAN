@@ -28,8 +28,8 @@ class HDF5FileHandler:
             (String or int) Compression strategy. Legal values are 'gzip', 'szip', 'lzf'. If an integer in range(10), this indicates gzip compression level. Otherwise, an integer indicates the number of a dynamically loaded compression filter.
         """
         self.filepath = Path(filepath)
-        if not self.filepath.suffix == ".hdf5":
-            raise ValueError("The file must be an HDF5 file (.hdf5)")
+        if not self.filepath.suffix == ".h5":
+            raise ValueError("The file must be an HDF5 file (.h5)")
         if not self.filepath.suffix:
             raise ValueError("The path must have an extension")
         if not isinstance(compression, (str, int)):
@@ -306,12 +306,14 @@ class PatientDataStorer:
         # gets array with N slices
         ct_volume = ct_scan.get_array()
 
+        
+
         # resizes the CT volumes to standard number of slices
         # if resizing made during preprocess, pixel spacing would be wrong during
         # drr generation
-        ct_volume = CTProcessor(ct_volume, None)
+        #ct_volume = CTProcessor(ct_volume, None)
         #ct_volume._resize() # keep same size, resize during training (trilinear)
-        ct_volume = ct_volume.array
+        #ct_volume = ct_volume.array
 
         metadata = {}
         dcm = ct_scan.dicom.dicom
@@ -323,15 +325,16 @@ class PatientDataStorer:
         metadata["age"] = age.replace("Y", "")
         metadata["slice_thickness"] = str(dcm.get("SliceThickness"))
         metadata["acquisition_date"] = str(dcm.get("AcquisitionDate"))
+        metadata["spacing"] = ct_scan.spacing
 
         h5f.store_array("ct", ct_volume)
-        h5f.store_array("frontal_drr", frontal_drr)
-        h5f.store_array("lateral_drr", lateral_drr)
+        h5f.store_array("xray1", frontal_drr)
+        h5f.store_array("xray2", lateral_drr)
         h5f.store_dict("metadata", metadata)
         if frontal_xray is not None:
-            h5f.store_array("frontal_xray", frontal_xray)
+            h5f.store_array("real_xray1", frontal_xray)
         if lateral_xray is not None:
-            h5f.store_array("lateral_xray", lateral_xray)
+            h5f.store_array("real_xray2", lateral_xray)
 
         h5f.close()
 

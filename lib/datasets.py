@@ -13,7 +13,7 @@ class BaseDataset(Dataset):  # Base Dataset implementing basic info and other st
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__()
         self.data_root = Path(data_root)
-        self.paths = list(self.data_root.rglob("*.hdf5"))
+        self.paths = list(self.data_root.rglob("*.h5"))
         self.data = []
         self.transforms = transforms
         self.ct_transforms = ct_transforms

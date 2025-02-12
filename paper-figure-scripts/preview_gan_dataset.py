@@ -12,10 +12,10 @@ OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
 
 exclude_tags = ["metadata", "ct"]
 
-for path in tqdm(list(GAN_DATASET.rglob("*.hdf5"))):
+for path in tqdm(list(GAN_DATASET.rglob("*.h5"))):
     handler = HDF5FileHandler(path, mode="read_only")
 
-    # ['ct', 'frontal_drr', 'frontal_xray', 'lateral_drr', 'lateral_xray', 'metadata']
+    # ['ct', 'xray1', 'real_xray1', 'xray2', 'real_xray2', 'metadata']
     for key in handler.file.keys():
         if key in exclude_tags:
             continue

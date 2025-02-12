@@ -439,9 +439,9 @@ class CTProcessor(BaseProcessor):
         padding.
         """
         # resizes to 100 slices
-        slcs = [cv2.resize(slc,(100, 512)) for slc in self.array]
+        slcs = [cv2.resize(slc,(512, 512)) for slc in self.array] # was (100,512)
         self.array = np.stack(slcs)
-        if self.array.shape[-1] != 100:
+        if self.array.shape[-1] != 512:
             raise ValueError("Shape is different than 100")
         return
 

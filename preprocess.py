@@ -263,7 +263,7 @@ for patient in dataset:
         logger.debug("No CT scans found for this patient. Skipping...")
         continue
 
-    patient_output_file = SAVE_ROOT / (patient + ".hdf5")
+    patient_output_file = SAVE_ROOT / (patient + ".h5")
     if (
         patient_output_file.exists()
     ):  # if the file already exists, skip it to avoid overwriting
