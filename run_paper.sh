@@ -2,5 +2,6 @@
 
 python preprocess.py
 
-python paper-figure-scripts/generate-drr-processing-figures.py data output/processing-examples --full-unordered-samples
+python paper-figure-scripts/preview_gan_dataset.py
 
+python paper-figure-scripts/generate-drr-processing-figures.py data output/processing-examples --full-unordered-samples
