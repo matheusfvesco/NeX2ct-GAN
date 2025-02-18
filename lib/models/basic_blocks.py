@@ -93,11 +93,15 @@ class EncoderBlock(nn.Module):
         self, in_channels, out_channels, kernel_size, stride, block: nn.Module
     ):
         super().__init__()
+        self.norm1 = nn.InstanceNorm2d(in_channels)
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride)
+        self.norm2 = nn.InstanceNorm2d(out_channels)
         self.block = block(out_channels)
 
     def forward(self, x):
+        x = self.norm1(x)
         x = self.conv1(x)  # reduce spatial
+        x = self.norm2(x)
         x = self.block(x)  # extract features
         return x
 
@@ -123,12 +127,16 @@ class ClassifierBlock(nn.Module):
         self, in_channels, out_channels, kernel_size, stride, block: nn.Module
     ):
         super().__init__()
+        self.norm1 = nn.InstanceNorm3d(in_channels)
         self.conv1 = nn.Conv3d(
             in_channels, out_channels, kernel_size, stride
         )  # 2x2 s=2
-        self.block = block(in_channels)
+        self.norm2 = nn.InstanceNorm3d(out_channels)
+        self.block = block(out_channels)
 
     def forward(self, x):
-        x = (self.conv1(x),)  # reduce spatial
+        x = self.norm1(x)
+        x = self.conv1(x)  # reduce spatial
+        x = self.norm2(x)
         x = self.block(x)  # extract features
         return x
