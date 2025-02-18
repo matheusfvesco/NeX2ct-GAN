@@ -1,8 +1,7 @@
 import pytest
 import torch
-from lib.models.basic_blocks import Downsample, EncoderBlock, DecoderBlock
-from torch import nn
-from lib.models.convnext import ConvnextBlock
+from lib.models.basic_blocks import Downsample, EncoderBlock, DecoderBlock, ClassifierBlock
+from lib.models.convnext import ConvnextBlock, Convnext3dBlock
 
 
 
@@ -122,7 +121,37 @@ def test_downsample_identity(in_channels, out_channels, kernel_size, stride, pad
 ])
 def test_encoder(in_channels, out_channels, kernel_size, stride):
     x = torch.randn((5, in_channels, 200, 200))
-    downsample = EncoderBlock(
+    encoder = EncoderBlock(
 in_channels, out_channels, kernel_size, stride, block=ConvnextBlock
     )
-    out = downsample(x)
+    out = encoder(x)
+    assert out.size(1) == out_channels
+
+    expected_height = (200 - kernel_size) // stride + 1
+    expected_width = (200 - kernel_size) // stride + 1
+
+    assert out.size(2) == expected_height
+    assert out.size(3) == expected_width
+
+
+@pytest.mark.parametrize("in_channels,out_channels,kernel_size,stride", [
+    #(in_channels, out_channels, kernel_size, stride, block: nn.Module)
+    (1, 8, 3, 2),
+    #(1, 16, 1, 1),
+    #(1, 32, 2, 2),
+])
+def test_classifier(in_channels, out_channels, kernel_size, stride):
+    x = torch.randn((5, in_channels, 200, 200, 200))
+    x = x.to("cuda")
+    classifier = ClassifierBlock(
+in_channels, out_channels, kernel_size, stride, block=Convnext3dBlock
+    )
+    classifier = classifier.to("cuda")
+    out = classifier(x)
+    assert out.size(1) == out_channels
+
+    expected_height = (200 - kernel_size) // stride + 1
+    expected_width = (200 - kernel_size) // stride + 1
+
+    assert out.size(2) == expected_height
+    assert out.size(3) == expected_width
