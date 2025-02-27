@@ -7,26 +7,26 @@ from lib.models.convnext import Convnext3dBlock
 class Discriminator(nn.Module):
     def __init__(self, features: list[int], device="cpu", *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.device = device
         encoder = []
 
+        dim = 256
         for in_channels, out_channels in zip(features, features[1:]):
             # TODO: check stride, 2 doesn't run due to memory, while 3 and 4 are feasable
             # should use ks = stride
             encoder.append(
                 ClassifierBlock(in_channels, out_channels, 2, 2, Convnext3dBlock).to(device)
             )
+            dim = (dim - 2) // 2 + 1  # For kernel=2, stride=2, padding=0
         
+        out_dim = (dim**3) * features[-1]
+        self.head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(out_dim, 2)
+        ).to(self.device)
         self.encoder = nn.Sequential(*tuple(encoder)).to(device)
-        self.device = device
 
     def forward(self, x):
         x: torch.Tensor = self.encoder(x)
-        x = x.flatten(1)
-        #assert x.shape is None, f"{x.shape}"
-        _, features = x.size() 
-        head = nn.Sequential(
-            #nn.Linear(features, features),
-            nn.Linear(features, 2)
-        ).to(self.device)
-        x = head(x)
+        x = self.head(x)
         return x
