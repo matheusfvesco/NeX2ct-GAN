@@ -60,6 +60,7 @@ class Generator(nn.Module):
         self.merger = merger
         #self.decoder1 = nn.Sequential(*tuple(decoder1))
         self.linker = Skip(features[-1], features[-1]).to(device)
+        self.f_act = nn.Tanh()
     
 
 
@@ -127,5 +128,7 @@ class Generator(nn.Module):
                 x_out: torch.Tensor = x_out + x
                 x_out = x_out / 2 # mean
             x_out = layer(x_out)
+        
+        x_out = self.f_act(x_out)
 
         return x_out
