@@ -1,8 +1,15 @@
 import pytest
 import torch
+import torch.nn as nn
 from lib.models.generator import Generator
+from lib.models.basic_blocks import EncoderBlock
+from lib.models.convnext import ConvnextBlock
 from lib.utils.viz import ArrayDisplayUtility
 from time import sleep
+import torchvision
+from torchvision.datasets import MNIST
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
 
 
 @pytest.mark.parametrize("features",[
@@ -43,3 +50,47 @@ def test_generator(features):
     assert w1 == w2
     assert h2 == w2 == d2
 
+def test_encoder():
+    features_encoder = [1, 8, 16, 32]
+    encoder = []
+    for in_channels, out_channels in zip(features_encoder, features_encoder[1:]):
+        encoder.append(
+            EncoderBlock(in_channels, out_channels, 2, 2, ConvnextBlock).to("cuda")
+        )
+    model = nn.Sequential(
+        *tuple(encoder)
+    )
+    model = nn.Sequential(
+        model,
+        nn.Flatten(),
+        nn.LazyLinear(28),
+        nn.Linear(28, 10)
+    )
+    model.to("cuda")
+
+    transforms = T.Compose([
+        T.ToTensor(),
+        T.Resize((256, 256), antialias=True),
+    ])
+    dataset = MNIST("~/", download=True, transform=transforms)
+    dataloader = DataLoader(dataset, batch_size=64)
+    lr = 1e-3
+    criterion = torch.nn.CrossEntropyLoss()
+    optimizer = torch.optim.AdamW(model.parameters(),lr)
+    losses = []
+    for epoch in range(3):
+        running_loss = 0.0
+        for img, labels in dataloader:
+            img = img.to("cuda")
+            labels = labels.to("cuda")
+            optimizer.zero_grad()
+            outputs = model(img)
+            loss = criterion(outputs, labels)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+        losses.append(running_loss)
+    
+    assert losses[-1] < losses[0]
+        
