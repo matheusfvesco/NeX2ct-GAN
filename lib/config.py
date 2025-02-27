@@ -9,25 +9,37 @@ class Config:
             self.data = yaml.safe_load(f)
 
         # defines most common settings for IntelliSense
-        self.lr = self.lr if "lr" in self.data else None
+        self.experiment_name = self.experiment_name if "experiment_name" in self.data else None
+        self.comment = self.comment if "comment" in self.data else None
+        
         self.epochs = self.epochs if "epochs" in self.data else None
         self.batch_size = self.batch_size if "batch_size" in self.data else None
+        self.device = self.device if "device" in self.data else None
+        self.dataset = self.dataset if "dataset" in self.data else None
+        
         self.optimizer = self.optimizer if "optimizer" in self.data else None
         self.scheduler = self.scheduler if "scheduler" in self.data else None
-        self.device = self.device if "device" in self.data else None
-        self.architecture = self.architecture if "architecture" in self.data else None
+        
+        self.train: Config = self.train if "train" in self.data else None
+        self.test: Config = self.test if "test" in self.data else None
+        
+        self.generator: Config = self.generator if "generator" in self.data else None
+        self.discriminator: Config = (
+            self.discriminator if "discriminator" in self.data else None
+        )
+        
+        self.arch = self.arch if "arch" in self.data else None
+        self.lr = self.lr if "lr" in self.data else None
+        self.input_dim = self.input_dim if "input_dim" in self.data else None
+        self.ct_dim = self.ct_dim if "ct_dim" in self.data else None
+        self.features = self.features if "features" in self.data else None
+
+
         self.input = self.input if "input" in self.data else None
         self.output = self.output if "output" in self.data else None
         self.model_name = self.model_name if "model_name" in self.data else None
         self.checkpoint = self.checkpoint if "checkpoint" in self.data else None
-        self.discriminator: Config = (
-            self.discriminator if "discriminator" in self.data else None
-        )
-        self.generator: Config = self.generator if "generator" in self.data else None
-        self.train: Config = self.train if "train" in self.data else None
-        self.test: Config = self.test if "test" in self.data else None
-        self.val: Config = self.val if "val" in self.data else None
-
+        
     def __str__(self) -> str:
         return f"Config({str(self.data)})"
 
