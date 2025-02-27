@@ -29,5 +29,7 @@ wheels/
 /intermediary_outputs
 /preprocess
 
+!/splits/*
+
 .ruff_cache
 .hypothesis
