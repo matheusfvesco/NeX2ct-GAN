@@ -111,14 +111,18 @@ class DecoderBlock(nn.Module):
         self, in_channels, out_channels, kernel_size, stride, block: nn.Module
     ):
         super().__init__()
+        self.block = block(in_channels)
         self.conv1 = nn.ConvTranspose3d(
             in_channels, out_channels, kernel_size, stride
         )  # most likely ks=2, stride=2
-        self.block = block(out_channels)
+        self.norm = nn.InstanceNorm3d(out_channels)
+        self.act = nn.GELU()
 
     def forward(self, x):
-        x = self.conv1(x)  # reduce spatial
         x = self.block(x)  # extract features
+        x = self.conv1(x)  # increase spatial
+        x = self.norm(x)
+        x = self.act(x)
         return x
 
 
