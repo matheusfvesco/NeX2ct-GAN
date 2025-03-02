@@ -24,6 +24,7 @@ def test_generator(features):
     x2 = x2.to("cuda")
     generator = Generator(
         features=features,
+        permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]),
         device="cuda"
     )
     generator = generator.to("cuda")
