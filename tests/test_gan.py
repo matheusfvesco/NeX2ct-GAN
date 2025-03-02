@@ -13,7 +13,7 @@ from lib.models.gan import GanModel
 def test_discriminator(gen_features, disc_features):
     x1 = torch.randn((1, 1, 256, 256)).to("cuda")
     x2 = torch.randn((1, 1, 256, 256)).to("cuda")
-    gen = Generator(gen_features, device="cuda")
+    gen = Generator(gen_features, permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]), device="cuda")
     disc = Discriminator(disc_features, device="cuda")
     gan = GanModel(gen,disc)
 

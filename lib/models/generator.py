@@ -5,7 +5,7 @@ from lib.models.convnext import ConvnextBlock, Convnext3dBlock
 
 
 class Generator(nn.Module):
-    def __init__(self, features: list[int], device="cpu", *args, **kwargs):
+    def __init__(self, features: list[int], permute_order: tuple, device="cpu", *args, **kwargs):
         super().__init__(*args, **kwargs)
         features_encoder = features
         self.device = device
@@ -61,6 +61,7 @@ class Generator(nn.Module):
         #self.decoder1 = nn.Sequential(*tuple(decoder1))
         self.linker = Skip(features[-1], features[-1]).to(device)
         self.f_act = nn.Tanh()
+        self.permute1, self.permute2 = permute_order
     
 
 
@@ -117,9 +118,12 @@ class Generator(nn.Module):
             x2 = layer(x2)
             net2_out.append(x2)
         
+        # merges input list 
         x_out = None
         for x1, x2, layer in zip(net1_out, net2_out, self.merger):
-            x2 = x2.permute((0, 1, 3, 2, 4))
+            #x2 = x2.permute((0, 1, 3, 2, 4))
+            x1 = x1.permute(*tuple(self.permute1))
+            x2 = x2.permute(*tuple(self.permute2))
             #assert x2.size()[1] == 200000, f"{[(x1.shape, x2.shape) for x1, x2 in zip(net1_out, net2_out)]}"
             x = x1 + x2
             if x_out is None:
