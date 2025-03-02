@@ -1,6 +1,7 @@
 """
 Implements pytorch Datasets for h5 files
 """
+
 import torch
 from torch.utils.data import Dataset
 import h5py
@@ -9,7 +10,9 @@ from pathlib import Path
 import numpy as np
 
 
-class BaseDataset(Dataset):  # Base Dataset implementing basic info and other stuff for h5
+class BaseDataset(
+    Dataset
+):  # Base Dataset implementing basic info and other stuff for h5
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__()
         self.data_root = Path(data_root)
@@ -27,6 +30,7 @@ class BaseDataset(Dataset):  # Base Dataset implementing basic info and other st
 
 class Real(BaseDataset):
     EXPECTED_KEYS = ["frontal_xray", "lateral_xray"]
+
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__(data_root, transforms, ct_transforms)
         for path in self.paths:
@@ -36,7 +40,7 @@ class Real(BaseDataset):
                 if key in keys:
                     self.data.append(path)
                     break
-    
+
     def __getitem__(self, index):
         file = h5py.File(self.data[index])
         ct = torch.Tensor(np.array(file["ct"]))
@@ -51,6 +55,7 @@ class Real(BaseDataset):
 
 class Synthetic(BaseDataset):
     EXPECTED_KEYS = ["frontal_drr", "lateral_drr"]
+
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__(data_root, transforms, ct_transforms)
         for path in self.paths:
@@ -60,7 +65,7 @@ class Synthetic(BaseDataset):
                 if key in keys:
                     self.data.append(path)
                     break
-    
+
     def __getitem__(self, index):
         file = h5py.File(self.data[index])
         return file
@@ -73,6 +78,7 @@ class Mixed(BaseDataset):
 class RealXRayClassifier(BaseDataset):
     EXPECTED_KEYS = ["frontal_xray", "lateral_xray"]
     classes = ["frontal_xray", "lateral_xray"]
+
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__(data_root, transforms, ct_transforms)
         # takes only patients with both real xray views
@@ -85,28 +91,27 @@ class RealXRayClassifier(BaseDataset):
                 continue
             self.data.append((path, "frontal_xray"))
             self.data.append((path, "lateral_xray"))
-    
+
     def __getitem__(self, index):
         path, key = self.data[index]
         file = HDF5FileHandler(path)
 
         # shape should be (N, M)
         xray = torch.Tensor(file.retrieve_array(key))
-        
+
         if self.transforms:
             xray = self.transforms(xray)
         # shape should be (3, 200, 200)
         # Normalize(mean=[x, y, z]) creates channels
-        mapping = {
-            "frontal_xray": 0,
-            "lateral_xray": 1
-        }
+        mapping = {"frontal_xray": 0, "lateral_xray": 1}
         target = torch.tensor(mapping[key])
         return xray, target
+
 
 class SyntheticXRayClassifier(BaseDataset):
     EXPECTED_KEYS = ["frontal_drr", "lateral_drr"]
     classes = ["frontal_drr", "lateral_drr"]
+
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__(data_root, transforms, ct_transforms)
         # takes only patients with both real xray views
@@ -119,28 +124,27 @@ class SyntheticXRayClassifier(BaseDataset):
                 continue
             self.data.append((path, "frontal_drr"))
             self.data.append((path, "lateral_drr"))
-    
+
     def __getitem__(self, index):
         path, key = self.data[index]
         file = HDF5FileHandler(path)
 
         # shape should be (N, M)
         xray = torch.Tensor(file.retrieve_array(key))
-        
+
         if self.transforms:
             xray = self.transforms(xray)
         # shape should be (3, 200, 200)
         # Normalize(mean=[x, y, z]) creates channels
-        mapping = {
-            "frontal_drr": 0,
-            "lateral_drr": 1
-        }
+        mapping = {"frontal_drr": 0, "lateral_drr": 1}
         target = torch.tensor(mapping[key])
         return xray, target
-    
+
+
 class MixedXRayClassifier(BaseDataset):
     EXPECTED_KEYS = ["frontal_drr", "lateral_drr"]
     classes = ["frontal_drr", "lateral_drr"]
+
     def __init__(self, data_root, transforms=None, ct_transforms=None):
         super().__init__(data_root, transforms, ct_transforms)
         # takes only patients with both real xray views
@@ -153,7 +157,7 @@ class MixedXRayClassifier(BaseDataset):
                 continue
             self.data.append((path, "frontal_drr"))
             self.data.append((path, "lateral_drr"))
-    
+
     def __getitem__(self, index):
         path, key = self.data[index]
         file = HDF5FileHandler(path)
@@ -163,7 +167,7 @@ class MixedXRayClassifier(BaseDataset):
 
         # shape should be (N, M)
         xray = torch.Tensor(file.retrieve_array(key))
-        
+
         if self.transforms:
             xray = self.transforms(xray)
         # shape should be (3, 200, 200)
@@ -176,3 +180,81 @@ class MixedXRayClassifier(BaseDataset):
         }
         target = torch.tensor(mapping[key])
         return xray, target
+
+
+class RealCT(BaseDataset):
+    def __init__(
+        self,
+        data_root: str | Path,
+        set_file: str | Path,
+        transforms=None,
+        ct_transforms=None,
+    ):
+        super().__init__(data_root, transforms, ct_transforms)
+        self.set_file_path = Path(set_file)
+
+        with open(self.set_file_path) as f:
+            lines = f.readlines()
+        
+        selected_set = [line.replace("\n","") for line in lines]
+        for path in self.paths:
+            if not path.name in selected_set:
+                continue
+            self.data.append(path)
+    
+    def __getitem__(self, index):
+        path = self.data[index]
+
+        file = HDF5FileHandler(path)
+
+        ct = torch.Tensor(file.retrieve_array("ct"))
+        xr1 = torch.Tensor(file.retrieve_array("real_xray1"))
+        xr2 = torch.Tensor(file.retrieve_array("real_xray2"))
+
+        if self.ct_transforms:
+            ct = self.ct_transforms(ct)
+        
+        if self.transforms:
+            xr1 = self.transforms(xr1)
+            xr2 = self.transforms(xr2)
+        
+        return ct, xr1, xr2, path
+
+        
+class SyntheticCT(BaseDataset):
+    def __init__(
+        self,
+        data_root: str | Path,
+        set_file: str | Path,
+        transforms=None,
+        ct_transforms=None,
+    ):
+        super().__init__(data_root, transforms, ct_transforms)
+        self.set_file_path = Path(set_file)
+
+        with open(self.set_file_path) as f:
+            lines = f.readlines()
+        
+        selected_set = [line.replace("\n","") for line in lines]
+        for path in self.paths:
+            if not path.name in selected_set:
+                continue
+            self.data.append(path)
+    
+    def __getitem__(self, index):
+        path = self.data[index]
+
+        file = HDF5FileHandler(path)
+
+        ct = torch.Tensor(file.retrieve_array("ct"))
+        xr1 = torch.Tensor(file.retrieve_array("xray1"))
+        xr2 = torch.Tensor(file.retrieve_array("xray2"))
+
+        if self.ct_transforms:
+            ct = self.ct_transforms(ct)
+        
+        if self.transforms:
+            xr1 = self.transforms(xr1)
+            xr2 = self.transforms(xr2)
+        
+        return ct, xr1, xr2, path
