@@ -6,6 +6,8 @@ from lib.utils.viz import ArrayDisplayUtility
 from pathlib import Path
 from tqdm import tqdm
 
+THUMBNAIL_SIZE = 256
+
 GAN_DATASET = Path("preprocess/GAN-dataset")
 OUTPUT_PATH = GAN_DATASET / "preview"
 OUTPUT_PATH.mkdir(parents=True, exist_ok=True)
@@ -22,26 +24,26 @@ for path in tqdm(list(GAN_DATASET.rglob("*.h5"))):
         array = handler.retrieve_array(key)
         visualizer = ArrayDisplayUtility(array)
         visualizer.write_as_image(
-            OUTPUT_PATH / f"{path.stem}_{key}.jpeg", thumbnail=200
+            OUTPUT_PATH / f"{path.stem}_{key}.jpeg", thumbnail=THUMBNAIL_SIZE
         )
 
     array = handler.retrieve_array("ct")
     visualizer = ArrayDisplayUtility(array)
     visualizer.write_as_image(
         OUTPUT_PATH / f"{path.stem}_ct_0.jpeg",
-        thumbnail=200,
+        thumbnail=THUMBNAIL_SIZE,
         axis=0,
         complete_array=False,
     )
     visualizer.write_as_image(
         OUTPUT_PATH / f"{path.stem}_ct_1.jpeg",
-        thumbnail=200,
+        thumbnail=THUMBNAIL_SIZE,
         axis=1,
         complete_array=False,
     )
     visualizer.write_as_image(
         OUTPUT_PATH / f"{path.stem}_ct_2.jpeg",
-        thumbnail=200,
+        thumbnail=THUMBNAIL_SIZE,
         axis=2,
         complete_array=False,
     )

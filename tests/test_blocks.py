@@ -15,7 +15,7 @@ from lib.models.convnext import ConvnextBlock, Convnext3dBlock
 ])
 def test_downsample_channels(in_channels, out_channels, kernel_size, stride, padding, dilation):
     assert in_channels != out_channels
-    x = torch.randn((5, in_channels, 200, 200))
+    x = torch.randn((5, in_channels, 256, 256))
     downsample = Downsample(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -42,7 +42,7 @@ def test_downsample_channels(in_channels, out_channels, kernel_size, stride, pad
 ])
 def test_downsample_spatial(in_channels, out_channels, kernel_size, stride, padding, dilation):
     assert in_channels == out_channels
-    x = torch.randn((5, in_channels, 200, 200))
+    x = torch.randn((5, in_channels, 256, 256))
     downsample = Downsample(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -70,7 +70,7 @@ def test_downsample_spatial(in_channels, out_channels, kernel_size, stride, padd
 ])
 def test_downsample_spatial_and_channels(in_channels, out_channels, kernel_size, stride, padding, dilation):
     assert in_channels != out_channels
-    x = torch.randn((5, in_channels, 200, 200))
+    x = torch.randn((5, in_channels, 256, 256))
     downsample = Downsample(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -96,7 +96,7 @@ def test_downsample_spatial_and_channels(in_channels, out_channels, kernel_size,
     (256, 256, 1, 1, 0, 1),
 ])
 def test_downsample_identity(in_channels, out_channels, kernel_size, stride, padding, dilation):
-    x = torch.randn((5, in_channels, 200, 200))
+    x = torch.randn((5, in_channels, 256, 256))
     downsample = Downsample(
         in_channels=in_channels,
         out_channels=out_channels,
@@ -120,15 +120,15 @@ def test_downsample_identity(in_channels, out_channels, kernel_size, stride, pad
     (50, 50, 2, 2),
 ])
 def test_encoder(in_channels, out_channels, kernel_size, stride):
-    x = torch.randn((5, in_channels, 200, 200))
+    x = torch.randn((5, in_channels, 256, 256))
     encoder = EncoderBlock(
 in_channels, out_channels, kernel_size, stride, block=ConvnextBlock
     )
     out = encoder(x)
     assert out.size(1) == out_channels
 
-    expected_height = (200 - kernel_size) // stride + 1
-    expected_width = (200 - kernel_size) // stride + 1
+    expected_height = (256 - kernel_size) // stride + 1
+    expected_width = (256 - kernel_size) // stride + 1
 
     assert out.size(2) == expected_height
     assert out.size(3) == expected_width
@@ -141,7 +141,7 @@ in_channels, out_channels, kernel_size, stride, block=ConvnextBlock
     #(1, 32, 2, 2),
 ])
 def test_classifier(in_channels, out_channels, kernel_size, stride):
-    x = torch.randn((5, in_channels, 200, 200, 200))
+    x = torch.randn((5, in_channels, 256, 256, 256))
     x = x.to("cuda")
     classifier = ClassifierBlock(
 in_channels, out_channels, kernel_size, stride, block=Convnext3dBlock
@@ -150,8 +150,8 @@ in_channels, out_channels, kernel_size, stride, block=Convnext3dBlock
     out = classifier(x)
     assert out.size(1) == out_channels
 
-    expected_height = (200 - kernel_size) // stride + 1
-    expected_width = (200 - kernel_size) // stride + 1
+    expected_height = (256 - kernel_size) // stride + 1
+    expected_width = (256 - kernel_size) // stride + 1
 
     assert out.size(2) == expected_height
     assert out.size(3) == expected_width

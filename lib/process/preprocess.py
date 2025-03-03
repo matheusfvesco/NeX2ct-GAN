@@ -3,7 +3,9 @@ from __future__ import annotations
 import numpy as np
 from abc import ABC
 import cv2
+import torch
 
+RESIZE_SIZE = 256
 
 from typing import TYPE_CHECKING
 
@@ -149,6 +151,8 @@ class XRayProcessor(BaseProcessor):
         # self._set_max_to_min()
         self._normalize()
 
+        self._resize()
+
         return self.array
 
     def _process_compose(self, transforms: list[str]):
@@ -196,8 +200,9 @@ class XRayProcessor(BaseProcessor):
             raise ValueError(f"Transform '{name}' not recognized.")
 
     def _normalize(self):
+        self.array = self.array.astype(np.float64)
         self.array = self.array - np.min(self.array)
-        self.array = (255 / (np.max(self.array) - np.min(self.array))) * (
+        self.array = (1 / (np.max(self.array) - np.min(self.array))) * (
             self.array - np.min(self.array)
         )
 
@@ -290,6 +295,9 @@ class XRayProcessor(BaseProcessor):
 
     def _get_photometric_information(self):
         self.photometric = self.dicom.get("PhotometricInterpretation")
+    
+    def _resize(self):
+        self.array = cv2.resize(self.array,(RESIZE_SIZE, RESIZE_SIZE))
 
 
 class CTProcessor(BaseProcessor):
@@ -438,6 +446,17 @@ class CTProcessor(BaseProcessor):
         resize using one of the axis. If there are less than 100 slices, add
         padding.
         """
+        arr = torch.Tensor(self.array)
+        arr = arr.unsqueeze(0).unsqueeze(0)
+        arr = torch.nn.functional.interpolate(arr,size=(RESIZE_SIZE,RESIZE_SIZE,RESIZE_SIZE), mode="trilinear")
+        arr = arr.squeeze()
+        self.array = arr.numpy()
+        for shape in self.array.shape:
+            if shape == RESIZE_SIZE:
+                continue
+            ValueError(f"Shape ({self.array.shape}) is different than ({RESIZE_SIZE},{RESIZE_SIZE},{RESIZE_SIZE})")
+        return
+
         # resizes to 100 slices
         slcs = [cv2.resize(slc,(512, 512)) for slc in self.array] # was (100,512)
         self.array = np.stack(slcs)

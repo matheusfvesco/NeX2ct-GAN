@@ -10,10 +10,19 @@ def test_real_dataset(set):
     for ct, xr1, xr2, path in dataset:
         h, w, d = ct.size()
         assert h == w
-        assert h == 512
+        assert w == d
+        assert h == 256
+
+        h, w = xr1.size()
+        assert h == w
+        assert h == 256
+
+        h, w = xr2.size()
+        assert h == w
+        assert h == 256
 
 @pytest.mark.parametrize("set",["splits/test_synthetic.txt", "splits/train_synthetic.txt"])
-def test_real_dataset(set):
+def test_synthetic_dataset(set):
     dataset = SyntheticCT(
         data_root="preprocess/GAN-dataset",
         set_file=set,
@@ -21,4 +30,12 @@ def test_real_dataset(set):
     for ct, xr1, xr2, path in dataset:
         h, w, d = ct.size()
         assert h == w
-        assert h == 512
+        assert h == 256
+
+        h, w = xr1.size()
+        assert h == w
+        assert h == 256
+
+        h, w = xr2.size()
+        assert h == w
+        assert h == 256

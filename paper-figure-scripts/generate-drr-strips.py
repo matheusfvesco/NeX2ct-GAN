@@ -42,7 +42,7 @@ def main(args):
                 img = load_images_from_subdir(subdir, image_file.name)
                 transform = transforms.Compose(
                     [
-                        transforms.Resize((200, 200)),  # Resize to uniform size
+                        transforms.Resize((256, 256)),  # Resize to uniform size
                         transforms.ToTensor(),
                     ]
                 )

@@ -19,6 +19,7 @@ from lib.process.preprocess import CTProcessor
 
 from lib.utils.utils import degrees_to_radians
 
+RESIZE_SIZE = 256
 
 class DRRGenerator:
     def __init__(
@@ -215,5 +216,12 @@ class DRRGenerator:
             height=height,
             patch_size=patch_size,
         )
+
+        img = img.squeeze().cpu().numpy()
+        #img = img.squeeze().cpu()
+        img = cv2.resize(img,dsize=(RESIZE_SIZE, RESIZE_SIZE))
+        img = torch.Tensor(img).to(torch.float64)
+        img = (img - img.min()) / (img.max() - img.min())
+        assert img.max() == 1, f"{img.max()}, {img.min()}"
 
         return img

@@ -372,8 +372,8 @@ if __name__ == "__main__":
         "--thumbnail-size",
         "-ts",
         type=int,
-        help="""The size of the thumbnails that will be generated for each CT. Defaults to 200. If set to 0, full size will be used to save the files.""",
-        default=200,
+        help="""The size of the thumbnails that will be generated for each CT. Defaults to 256. If set to 0, full size will be used to save the files.""",
+        default=256,
     )
     parser.add_argument(
         "--full-unordered-samples",
