@@ -5,10 +5,9 @@ from lib.models.convnext import ConvnextBlock, Convnext3dBlock
 
 
 class Generator(nn.Module):
-    def __init__(self, features: list[int], permute_order: tuple, device="cpu", *args, **kwargs):
+    def __init__(self, features: list[int], permute_order: tuple, *args, **kwargs):
         super().__init__(*args, **kwargs)
         features_encoder = features
-        self.device = device
         encoder1 = []
         encoder2 = []
         skips1 = []
@@ -17,17 +16,17 @@ class Generator(nn.Module):
         # (1, 8), (8, 32), (32, 64), (64, 96)
         for in_channels, out_channels in zip(features_encoder, features_encoder[1:]):
             encoder1.append(
-                EncoderBlock(in_channels, out_channels, 2, 2, ConvnextBlock).to(device)
+                EncoderBlock(in_channels, out_channels, 2, 2, ConvnextBlock)
             )
             skips1.append(Skip(out_channels, out_channels))
             encoder2.append(
-                EncoderBlock(in_channels, out_channels, 2, 2, ConvnextBlock).to(device)
+                EncoderBlock(in_channels, out_channels, 2, 2, ConvnextBlock)
             )
             # (1, 8) -> (8, 1)
             # (8, 32) -> (32, 8)
             # (32, 64) -> (64, 32)
             # (64, 96) -> (96, 64)
-            skips2.append(Skip(out_channels, out_channels).to(device))
+            skips2.append(Skip(out_channels, out_channels))
         
         # [1, 8, 32, 64, 96] -> [96, 64, 32, 8, 1]
         features_decoder = list(reversed(features_encoder))
@@ -37,29 +36,25 @@ class Generator(nn.Module):
         # (96, 64), (64, 32), (32, 8), (8, 1)
         for in_channels, out_channels in zip(features_decoder, features_decoder[1:]):
             decoder1.append(
-                DecoderBlock(in_channels*2, out_channels, 2, 2, Convnext3dBlock).to(device) # times 2 cause unet concatenation (96+96), (8+8)
+                DecoderBlock(in_channels*2, out_channels, 2, 2, Convnext3dBlock) # times 2 cause unet concatenation (96+96), (8+8)
             )
             decoder2.append(
-                DecoderBlock(in_channels*2, out_channels, 2, 2, Convnext3dBlock).to(device)
+                DecoderBlock(in_channels*2, out_channels, 2, 2, Convnext3dBlock)
             )
         
         merger = []
         for in_channels, out_channels in zip(features_decoder[1:], features_decoder[2:]):
             merger.append(
-                DecoderBlock(in_channels, out_channels, 2, 2, Convnext3dBlock).to(device)
+                DecoderBlock(in_channels, out_channels, 2, 2, Convnext3dBlock)
             )
         
-
-        #self.encoder1 = nn.Sequential(*tuple(encoder1))
-        self.encoder1 = encoder1
-        self.encoder2 = encoder2
-        self.skips1 = skips1
-        self.skips2 = skips2
-        self.decoder1 = decoder1
-        self.decoder2 = decoder2
-        self.merger = merger
-        #self.decoder1 = nn.Sequential(*tuple(decoder1))
-        self.linker = Skip(features[-1], features[-1]).to(device)
+        self.encoder1 = nn.ModuleList(encoder1)
+        self.encoder2 = nn.ModuleList(encoder2)
+        self.skips1 = nn.ModuleList(skips1)
+        self.skips2 = nn.ModuleList(skips2)
+        self.decoder1 = nn.ModuleList(decoder1)
+        self.decoder2 = nn.ModuleList(decoder2)
+        self.merger = nn.ModuleList(merger)
         self.f_act = nn.Tanh()
         self.permute1, self.permute2 = permute_order
     
@@ -69,14 +64,14 @@ class Generator(nn.Module):
         # runs encoder and store intermediary
         skips1 = []
         for layer in self.encoder1:
-            layer = layer.to(self.device)
+            layer = layer
             x1 = layer(x1)
             skips1.append(x1)
         
         # runs linker and store results
         skips = []
         for x, layer in zip(skips1, self.skips1):
-            layer = layer.to(self.device)
+            layer = layer
             x = layer(x)
             skips.append(x)
         skips1 = skips
@@ -86,7 +81,7 @@ class Generator(nn.Module):
         net1_out = []
         # concat encoder outputs and runs decoder block
         for x, layer in zip(reversed(skips1), self.decoder1):
-            layer = layer.to(self.device)
+            layer = layer
             x1 = torch.concat((x1,  x), dim=1)
             x1 = layer(x1)
             net1_out.append(x1)
@@ -103,7 +98,7 @@ class Generator(nn.Module):
         # runs linker and store results
         skips = []
         for x, layer in zip(skips2, self.skips2):
-            layer = layer.to(self.device)
+            layer = layer
             x = layer(x)
             skips.append(x)
         skips2 = skips
@@ -113,7 +108,7 @@ class Generator(nn.Module):
         net2_out = []
         # concat encoder outputs and runs decoder block
         for x, layer in zip(reversed(skips2), self.decoder2):
-            layer = layer.to(self.device)
+            layer = layer
             x2 = torch.concat((x2,  x), dim=1)
             x2 = layer(x2)
             net2_out.append(x2)

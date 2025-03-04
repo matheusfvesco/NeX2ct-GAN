@@ -5,9 +5,8 @@ from lib.models.convnext import Convnext3dBlock
 
 
 class Discriminator(nn.Module):
-    def __init__(self, features: list[int], device="cpu", *args, **kwargs):
+    def __init__(self, features: list[int], *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.device = device
         encoder = []
 
         dim = 256
@@ -15,7 +14,7 @@ class Discriminator(nn.Module):
             # TODO: check stride, 2 doesn't run due to memory, while 3 and 4 are feasable
             # should use ks = stride
             encoder.append(
-                ClassifierBlock(in_channels, out_channels, 2, 2, Convnext3dBlock).to(device)
+                ClassifierBlock(in_channels, out_channels, 2, 2, Convnext3dBlock)
             )
             dim = (dim - 2) // 2 + 1  # For kernel=2, stride=2, padding=0
         
@@ -23,8 +22,8 @@ class Discriminator(nn.Module):
         self.head = nn.Sequential(
             nn.Flatten(),
             nn.Linear(out_dim, 2)
-        ).to(self.device)
-        self.encoder = nn.Sequential(*tuple(encoder)).to(device)
+        )
+        self.encoder = nn.Sequential(*tuple(encoder))
 
     def forward(self, x):
         x: torch.Tensor = self.encoder(x)
