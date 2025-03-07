@@ -3,9 +3,10 @@ import torch.nn as nn
 
 
 class GANLoss(nn.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, device, *args, **kwargs):
         super().__init__(*args, **kwargs)
-    
+
+        self.device = device
         self.real_label = 1.0
         self.fake_label = 0.0
         self.loss = nn.MSELoss()
@@ -16,7 +17,7 @@ class GANLoss(nn.Module):
         else:
             label = self.fake_label
         
-        target = torch.zeros(preds.size(), dtype=torch.float).fill_(label).to("cuda:0")
+        target = torch.zeros(preds.size(), dtype=torch.float).fill_(label).to(self.device)
         return target
 
     def forward(self, preds, is_real):

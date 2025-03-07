@@ -17,7 +17,7 @@ class GanModel(nn.Module):
         self.generator = generator
         self.discriminator = discriminator
 
-        self.gan_loss = GANLoss()
+        self.gan_loss = GANLoss(device=opts.device)
 
         self.branch_loss = nn.MSELoss()
         self.identity_loss = nn.MSELoss()
