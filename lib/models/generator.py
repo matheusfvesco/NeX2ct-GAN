@@ -4,7 +4,7 @@ from lib.models.basic_blocks import EncoderBlock, DecoderBlock, Skip
 from lib.models.convnext import ConvnextBlock, Convnext3dBlock
 
 
-class Generator(nn.Module):
+class ConvnextGenerator(nn.Module):
     def __init__(self, features: list[int], permute_order: tuple, *args, **kwargs):
         super().__init__(*args, **kwargs)
         features_encoder = features
@@ -27,7 +27,7 @@ class Generator(nn.Module):
             # (32, 64) -> (64, 32)
             # (64, 96) -> (96, 64)
             skips2.append(Skip(out_channels, out_channels))
-        
+
         # [1, 8, 32, 64, 96] -> [96, 64, 32, 8, 1]
         features_decoder = list(reversed(features_encoder))
         decoder1 = []
@@ -36,18 +36,22 @@ class Generator(nn.Module):
         # (96, 64), (64, 32), (32, 8), (8, 1)
         for in_channels, out_channels in zip(features_decoder, features_decoder[1:]):
             decoder1.append(
-                DecoderBlock(in_channels*2, out_channels, 2, 2, Convnext3dBlock) # times 2 cause unet concatenation (96+96), (8+8)
+                DecoderBlock(
+                    in_channels * 2, out_channels, 2, 2, Convnext3dBlock
+                )  # times 2 cause unet concatenation (96+96), (8+8)
             )
             decoder2.append(
-                DecoderBlock(in_channels*2, out_channels, 2, 2, Convnext3dBlock)
+                DecoderBlock(in_channels * 2, out_channels, 2, 2, Convnext3dBlock)
             )
-        
+
         merger = []
-        for in_channels, out_channels in zip(features_decoder[1:], features_decoder[2:]):
+        for in_channels, out_channels in zip(
+            features_decoder[1:], features_decoder[2:]
+        ):
             merger.append(
                 DecoderBlock(in_channels, out_channels, 2, 2, Convnext3dBlock)
             )
-        
+
         self.encoder1 = nn.ModuleList(encoder1)
         self.encoder2 = nn.ModuleList(encoder2)
         self.skips1 = nn.ModuleList(skips1)
@@ -57,8 +61,6 @@ class Generator(nn.Module):
         self.merger = nn.ModuleList(merger)
         self.f_act = nn.Tanh()
         self.permute1, self.permute2 = permute_order
-    
-
 
     def forward(self, x1, x2):
         # runs encoder and store intermediary
@@ -67,7 +69,7 @@ class Generator(nn.Module):
             layer = layer
             x1 = layer(x1)
             skips1.append(x1)
-        
+
         # runs linker and store results
         skips = []
         for x, layer in zip(skips1, self.skips1):
@@ -75,17 +77,17 @@ class Generator(nn.Module):
             x = layer(x)
             skips.append(x)
         skips1 = skips
-        
+
         # last x is result of the first encoder-decoder link
         x1 = skips1[-1]
         net1_out = []
         # concat encoder outputs and runs decoder block
         for x, layer in zip(reversed(skips1), self.decoder1):
             layer = layer
-            x1 = torch.concat((x1,  x), dim=1)
+            x1 = torch.concat((x1, x), dim=1)
             x1 = layer(x1)
             net1_out.append(x1)
-        
+
         # ===========
         # NETWORK 2
         # ===========
@@ -94,7 +96,7 @@ class Generator(nn.Module):
             layer = layer
             x2 = layer(x2)
             skips2.append(x2)
-        
+
         # runs linker and store results
         skips = []
         for x, layer in zip(skips2, self.skips2):
@@ -102,32 +104,32 @@ class Generator(nn.Module):
             x = layer(x)
             skips.append(x)
         skips2 = skips
-        
+
         # last x is result of the first encoder-decoder link
         x2 = skips2[-1]
         net2_out = []
         # concat encoder outputs and runs decoder block
         for x, layer in zip(reversed(skips2), self.decoder2):
             layer = layer
-            x2 = torch.concat((x2,  x), dim=1)
+            x2 = torch.concat((x2, x), dim=1)
             x2 = layer(x2)
             net2_out.append(x2)
-        
-        # merges input list 
+
+        # merges input list
         x_out = None
         for x1, x2, layer in zip(net1_out, net2_out, self.merger):
-            #x2 = x2.permute((0, 1, 3, 2, 4))
+            # x2 = x2.permute((0, 1, 3, 2, 4))
             x1 = x1.permute(*tuple(self.permute1))
             x2 = x2.permute(*tuple(self.permute2))
-            #assert x2.size()[1] == 200000, f"{[(x1.shape, x2.shape) for x1, x2 in zip(net1_out, net2_out)]}"
+            # assert x2.size()[1] == 200000, f"{[(x1.shape, x2.shape) for x1, x2 in zip(net1_out, net2_out)]}"
             x = x1 + x2
             if x_out is None:
                 x_out = x
             else:
                 x_out: torch.Tensor = x_out + x
-                x_out = x_out / 2 # mean
+                x_out = x_out / 2  # mean
             x_out = layer(x_out)
-        
+
         x_out = self.f_act(x_out)
 
-        return x_out
+        return x_out, net1_out[-1], net2_out[-1]

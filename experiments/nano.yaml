@@ -1,0 +1,37 @@
+# base structure for all experiments
+experiment_name: "base"
+comment: "comment"
+epochs: 100
+batch_size: 2
+device: cuda:0
+dataset: synthetic # the set to be used, either synthetic, real, or mixed
+save_latest: true # wheter to save the latest or only the best results
+continue: true # wheter to continue training from previous checkpoint or not
+seed: 42
+data_root: preprocess/GAN-dataset
+dataset_set_root: splits
+
+train:
+  fraction: 0.9
+  scheduler_type: linear
+  warmup_scheduler: linear
+  optimizer: adam
+  loss: patches
+
+test:
+  fraction: 0.1
+
+generator:
+  arch: convnext
+  lr: 0.00001
+  input_dim: 256
+  ct_dim: 256 # generate 256 x 256 x 256 volumes
+  features: [1, 8, 32]
+  view1_permute: [0, 1, 2, 3, 4]
+  view2_permute: [0, 1, 3, 2, 4]
+
+discriminator:
+  arch: convnext
+  lr: 0.00001
+  input_dim: 256
+  features: [1, 8, 32]

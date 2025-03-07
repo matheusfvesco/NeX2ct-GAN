@@ -9,6 +9,18 @@ from lib.io import HDF5FileHandler
 from pathlib import Path
 import numpy as np
 
+def CTFactory(dataset_type, data_root, set_root, transforms: None, ct_transforms: None):
+    data_root = Path(data_root)
+    set_root = Path(set_root)
+    if dataset_type == "real":
+        train = RealCT(data_root=data_root, set_file=set_root/"train_real.txt", transforms=transforms, ct_transforms=ct_transforms)
+        test = RealCT(data_root=data_root, set_file=set_root/"test_real.txt", transforms=transforms, ct_transforms=ct_transforms)
+        return train, test
+    
+    if dataset_type == "synthetic":
+        train = SyntheticCT(data_root=data_root, set_file=set_root/"train_synthetic.txt", transforms=transforms, ct_transforms=ct_transforms)
+        test = SyntheticCT(data_root=data_root, set_file=set_root/"test_synthetic.txt", transforms=transforms, ct_transforms=ct_transforms)
+        return train, test
 
 class BaseDataset(
     Dataset
@@ -198,7 +210,7 @@ class RealCT(BaseDataset):
         
         selected_set = [line.replace("\n","") for line in lines]
         for path in self.paths:
-            if not path.name in selected_set:
+            if path.name not in selected_set:
                 continue
             self.data.append(path)
     
@@ -210,6 +222,11 @@ class RealCT(BaseDataset):
         ct = torch.Tensor(file.retrieve_array("ct"))
         xr1 = torch.Tensor(file.retrieve_array("real_xray1"))
         xr2 = torch.Tensor(file.retrieve_array("real_xray2"))
+        
+        # 1 channel
+        ct = ct.unsqueeze(0)
+        xr1 = xr1.unsqueeze(0)
+        xr2 = xr2.unsqueeze(0)
 
         if self.ct_transforms:
             ct = self.ct_transforms(ct)
@@ -237,7 +254,7 @@ class SyntheticCT(BaseDataset):
         
         selected_set = [line.replace("\n","") for line in lines]
         for path in self.paths:
-            if not path.name in selected_set:
+            if path.name not in selected_set:
                 continue
             self.data.append(path)
     
@@ -250,11 +267,23 @@ class SyntheticCT(BaseDataset):
         xr1 = torch.Tensor(file.retrieve_array("xray1"))
         xr2 = torch.Tensor(file.retrieve_array("xray2"))
 
+        # 1 channel and batch = 1
+        ct = ct.unsqueeze(0).unsqueeze(0)
+        ct = ct
+        xr1 = xr1.unsqueeze(0).unsqueeze(0)
+        xr1 = xr1
+        xr2 = xr2.unsqueeze(0).unsqueeze(0)
+        xr2 = xr2
+
         if self.ct_transforms:
             ct = self.ct_transforms(ct)
         
         if self.transforms:
             xr1 = self.transforms(xr1)
             xr2 = self.transforms(xr2)
+        
+        ct = ct.squeeze().unsqueeze(0)
+        xr1 = xr1.squeeze().unsqueeze(0)
+        xr2 = xr2.squeeze().unsqueeze(0)
         
         return ct, xr1, xr2, path

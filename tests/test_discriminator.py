@@ -19,13 +19,12 @@ def test_discriminator(features):
     x = x.to("cuda")
     generator = Discriminator(
         features=features,
-        device="cuda"
     )
     generator = generator.to("cuda")
     out: torch.Tensor = generator(x)
 
-    #_, c = out.size()
-    #assert c == 2
+    _, c = out.size()
+    assert c == 1
 
 def test_encoder():
     features_encoder = [1, 8, 16]

@@ -8,6 +8,8 @@ dataset: synthetic # the set to be used, either synthetic, real, or mixed
 save_latest: true # wheter to save the latest or only the best results
 continue: true # wheter to continue training from previous checkpoint or not
 seed: 42
+data_root: preprocess/GAN-dataset
+dataset_set_root: splits
 
 train:
   fraction: 0.9
@@ -21,7 +23,7 @@ test:
 
 generator:
   arch: convnext
-  lr: 1e-5
+  lr: 0.00001
   input_dim: 256
   ct_dim: 256 # generate 256 x 256 x 256 volumes
   features: [1, 8, 32, 64, 96]
@@ -30,6 +32,6 @@ generator:
 
 discriminator:
   arch: convnext
-  lr: 1e-5
+  lr: 0.00001
   input_dim: 256
   features: [1, 8, 16, 32]

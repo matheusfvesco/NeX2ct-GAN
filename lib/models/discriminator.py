@@ -21,7 +21,7 @@ class Discriminator(nn.Module):
         out_dim = (dim**3) * features[-1]
         self.head = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(out_dim, 2)
+            nn.Linear(out_dim, 1)
         )
         self.encoder = nn.Sequential(*tuple(encoder))
 

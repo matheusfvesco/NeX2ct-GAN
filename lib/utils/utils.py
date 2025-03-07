@@ -424,3 +424,11 @@ class DataStorer:
         df = pl.DataFrame(data)
         # Write the DataFrame to a CSV file
         df.write_csv(path, separator="\t")
+
+def collate_fn(batch):
+    cts = torch.stack([b[0] for b in batch])
+    xr1 = torch.stack([b[1] for b in batch])
+    xr2 = torch.stack([b[2] for b in batch])
+    paths = [b[3] for b in batch]
+
+    return cts, xr1, xr2, paths
