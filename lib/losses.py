@@ -16,7 +16,7 @@ class GANLoss(nn.Module):
         else:
             label = self.fake_label
         
-        target = torch.zeros(preds.size(), dtype=torch.float).fill_(label)
+        target = torch.zeros(preds.size(), dtype=torch.float).fill_(label).to("cuda:0")
         return target
 
     def forward(self, preds, is_real):
