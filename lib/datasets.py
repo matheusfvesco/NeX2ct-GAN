@@ -217,7 +217,7 @@ class RealCT(BaseDataset):
     def __getitem__(self, index):
         path = self.data[index]
 
-        file = HDF5FileHandler(path)
+        file = HDF5FileHandler(path,mode="read_only")
 
         ct = torch.Tensor(file.retrieve_array("ct"))
         xr1 = torch.Tensor(file.retrieve_array("real_xray1"))
@@ -261,7 +261,7 @@ class SyntheticCT(BaseDataset):
     def __getitem__(self, index):
         path = self.data[index]
 
-        file = HDF5FileHandler(path)
+        file = HDF5FileHandler(path,mode="read_only")
 
         ct = torch.Tensor(file.retrieve_array("ct"))
         xr1 = torch.Tensor(file.retrieve_array("xray1"))
