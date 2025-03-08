@@ -3,7 +3,7 @@ experiment_name: "base"
 comment: "comment"
 epochs: 100
 batch_size: 2
-device: cpu
+device: xla
 dataset: synthetic # the set to be used, either synthetic, real, or mixed
 save_latest: true # wheter to save the latest or only the best results
 continue: true # wheter to continue training from previous checkpoint or not
