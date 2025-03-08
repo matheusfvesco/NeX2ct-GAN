@@ -21,7 +21,7 @@ class GanModel(nn.Module):
 
         device = opts.device
         if device == "xla":
-            device = xm.xla_device()
+            device = xm.xla_device(0)
         self.gan_loss = GANLoss(device=opts.device)
 
         self.branch_loss = nn.MSELoss()

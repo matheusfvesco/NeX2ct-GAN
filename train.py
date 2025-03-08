@@ -57,7 +57,7 @@ def main(opts: Config):
 
     device = opts.device
     if device == "xla":
-        device = xm.xla_device()
+        device = xm.xla_device(0)
 
     generator = ConvnextGenerator(opts.generator.features,(opts.generator.view1_permute, opts.generator.view2_permute)).to(device)
     discriminator = Discriminator(opts.discriminator.features).to(device)
