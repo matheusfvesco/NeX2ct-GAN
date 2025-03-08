@@ -14,6 +14,8 @@ from lib.logging import setup_logger
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from torchvision.utils import make_grid
+import torch_xla
+import torch_xla.core.xla_model as xm
 
 
 def main(opts: Config):
@@ -54,6 +56,8 @@ def main(opts: Config):
     test_loader = DataLoader(test, batch_size=opts.batch_size,collate_fn=collate_fn)
 
     device = opts.device
+    if device == "xla":
+        device = xm.xla_device()
 
     generator = ConvnextGenerator(opts.generator.features,(opts.generator.view1_permute, opts.generator.view2_permute)).to(device)
     discriminator = Discriminator(opts.discriminator.features).to(device)

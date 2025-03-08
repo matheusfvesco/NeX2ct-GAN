@@ -1,5 +1,7 @@
 import torch
 import torch.nn as nn
+import torch_xla
+import torch_xla.core.xla_model as xm
 from lib.losses import GANLoss
 from lib.config import Config
 
@@ -17,6 +19,9 @@ class GanModel(nn.Module):
         self.generator = generator
         self.discriminator = discriminator
 
+        device = opts.device
+        if device == "xla":
+            device = xm.xla_device()
         self.gan_loss = GANLoss(device=opts.device)
 
         self.branch_loss = nn.MSELoss()
