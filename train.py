@@ -14,8 +14,14 @@ from lib.logging import setup_logger
 from torch.utils.tensorboard import SummaryWriter
 from pathlib import Path
 from torchvision.utils import make_grid
+
+
 import torch_xla
 import torch_xla.core.xla_model as xm
+import torch_xla.distributed.xla_multiprocessing as xmp
+import os
+
+os.environ['XRT_TPU_CONFIG'] = 'tpu_worker;0;localhost:8470'  # Kaggle's TPU address
 
 
 def main(opts: Config):
@@ -167,4 +173,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     config = Config(args.experiment_path)
-    main(config)
+    xmp.spawn(main, args=(config), nprocs=8)
+    #main(config)
