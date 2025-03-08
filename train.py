@@ -173,5 +173,5 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     config = Config(args.experiment_path)
-    xmp.spawn(main, args=(config), nprocs=8)
+    xmp.spawn(main, args=(config,), nprocs=8)
     #main(config)
