@@ -87,6 +87,32 @@ class Skip(nn.Module):
         x = self.norm3d(x)
         return x
 
+class Linker(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int, in_dim: int, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.in_dim = in_dim
+        self.in_channels = in_channels
+
+        total_in_dim = (in_dim ** 2) * in_channels
+        total_out_dim = (in_dim ** 3) * in_channels
+
+        self.fc1 = nn.Linear(total_in_dim, total_out_dim)
+        self.dropout = nn.Dropout()
+        self.act = nn.ReLU()
+
+        self.seq = nn.Sequential(
+            nn.Flatten(),
+            self.fc1,
+            self.dropout,
+            self.act
+        )
+    
+    def forward(self, x):
+        b, c, h, w = x.size()
+        x: torch.Tensor = self.seq(x)
+        x = x.reshape((b, c, self.in_dim, self.in_dim, self.in_dim))
+        return x
+
 
 class EncoderBlock(nn.Module):
     def __init__(
@@ -116,7 +142,7 @@ class DecoderBlock(nn.Module):
             in_channels, out_channels, kernel_size, stride
         )  # most likely ks=2, stride=2
         self.norm = nn.InstanceNorm3d(out_channels)
-        self.act = nn.GELU()
+        self.act = nn.ReLU()
 
     def forward(self, x):
         x = self.block(x)  # extract features
