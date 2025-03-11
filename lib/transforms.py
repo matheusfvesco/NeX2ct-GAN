@@ -9,6 +9,9 @@ class Normalize(nn.Module):
     
     def forward(self, x):
         x = (x - torch.min(x)) / (torch.max(x) - torch.min(x))
+
+        # [1, -1] range
+        x = 2 * x - 1
         return x
 
 class Resize(nn.Module):
