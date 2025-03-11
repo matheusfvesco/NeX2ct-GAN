@@ -1,7 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from lib.models.generator import ConvnextGenerator
+from lib.models.generator import SimpleGenerator, LinkerGenerator
 from lib.models.basic_blocks import EncoderBlock
 from lib.models.convnext import ConvnextBlock
 from lib.utils.viz import ArrayDisplayUtility
@@ -10,24 +10,28 @@ import torchvision
 from torchvision.datasets import MNIST
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
+from lib.factories import block_factory
 
 
 @pytest.mark.parametrize(
-    "features",
+    "features,block",
     [
-        [1, 2, 3, 4, 5],
-        [1, 8, 16, 32],
-        [1, 8, 32, 64, 96],
+        ([1, 2, 3, 4, 5], "convnext"),
+        ([1, 8, 16, 32], "simple"),
+        ([1, 8, 32, 64, 96], "simple"),
     ],
 )
-def test_generator(features):
+def test_simple_generator(features, block):
     x1 = torch.randn((1, 1, 256, 256))
     x2 = torch.randn((1, 1, 256, 256))
     x1 = x1.to("cuda")
     x2 = x2.to("cuda")
-    generator = ConvnextGenerator(
+
+    blocks = block_factory(block)
+    generator = SimpleGenerator(
         features=features,
         permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]),
+        blocks=blocks,
     )
     generator = generator.to("cuda")
     out, out_b1, out_b2 = generator(x1, x2)
@@ -71,6 +75,72 @@ def test_generator(features):
     assert h1 == h2
     assert w1 == w2
     assert d1 == d2
+
+
+@pytest.mark.parametrize(
+    "features,block",
+    [
+        ([1, 2, 3, 4, 5], "convnext"),
+        # ([1, 8, 16, 32], "simple"),
+        ([1, 8, 32, 15, 4], "simple"),
+        # ([1, 8, 32, 64, 96], "simple"),
+    ],
+)
+def test_linker_generator(features, block):
+    x1 = torch.randn((1, 1, 256, 256))
+    x2 = torch.randn((1, 1, 256, 256))
+    x1 = x1.to("cuda")
+    x2 = x2.to("cuda")
+
+    blocks = block_factory(block)
+    generator = LinkerGenerator(
+        features=features,
+        permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]),
+        blocks=blocks,
+    )
+    generator = generator.to("cuda")
+    out, out_b1, out_b2 = generator(x1, x2)
+
+    # merger outputs
+    assert len(out.shape) == 5
+    b1, c1, h1, w1 = x1.size()
+    b2, c2, h2, w2, d2 = out.size()
+    # sleep(15)
+
+    assert b1 == b2
+    assert c1 == c2
+    assert h1 == h2
+    assert w1 == w2
+    assert h2 == w2 == d2
+
+    b1, c1, h1, w1 = x2.size()
+    assert b1 == b2
+    assert c1 == c2
+    assert h1 == h2
+    assert w1 == w2
+    assert h2 == w2 == d2
+
+    # branch outputs
+    assert len(out_b1.shape) == 5
+    b1, c1, h1, w1, d1 = out.size()
+    b2, c2, h2, w2, d2 = out_b1.size()
+
+    assert b1 == b2
+    assert c1 == c2
+    assert h1 == h2
+    assert w1 == w2
+    assert d1 == d2
+
+    assert len(out_b1.shape) == 5
+    b1, c1, h1, w1, d1 = out.size()
+    b2, c2, h2, w2, d2 = out_b2.size()
+
+    assert b1 == b2
+    assert c1 == c2
+    assert h1 == h2
+    assert w1 == w2
+    assert d1 == d2
+
 
 def test_encoder():
     features_encoder = [1, 8, 16, 32]

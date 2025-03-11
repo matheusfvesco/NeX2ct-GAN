@@ -1,24 +1,27 @@
 import pytest
 import torch
 import torch.nn as nn
-from lib.models.discriminator import Discriminator
+from lib.discriminator import Discriminator
 from lib.models.basic_blocks import ClassifierBlock
 from lib.models.convnext import Convnext3dBlock
 from torchvision.datasets import MNIST
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
+from lib.factories import block_factory
 from time import sleep
 
-@pytest.mark.parametrize("features",[
-    [1, 2, 3],
-    [1, 8, 16],
-    [1, 8, 32],
+@pytest.mark.parametrize("features,block",[
+    ([1, 2, 3], "convnext"),
+    ([1, 8, 16], "simple"),
+    ([1, 8, 32], "simple"),
 ])
-def test_discriminator(features):
+def test_discriminator(features, block):
     x = torch.randn((2, 1, 256, 256, 256))
     x = x.to("cuda")
+    _, disc_block = block_factory(block)
     generator = Discriminator(
         features=features,
+        block=disc_block,
     )
     generator = generator.to("cuda")
     out: torch.Tensor = generator(x)
