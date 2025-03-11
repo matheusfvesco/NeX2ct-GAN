@@ -1,8 +1,8 @@
 import torch
 import torch.nn as nn
 import pytest
-from lib.models.generator import ConvnextGenerator
-from lib.models.discriminator import Discriminator
+from lib.models.generator import SimpleGenerator
+from lib.discriminator import Discriminator
 from lib.models.gan import GanModel
 from lib.config import Config
 
@@ -19,7 +19,7 @@ def test_gan(gen_features, disc_features):
     x1 = torch.randn((1, 1, 256, 256)).to("cuda")
     x2 = torch.randn((1, 1, 256, 256)).to("cuda")
     opts = Config("experiments/base.yaml")
-    gen = ConvnextGenerator(
+    gen = SimpleGenerator(
         gen_features, permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4])
     ).to("cuda")
     disc = Discriminator(disc_features).to("cuda")
@@ -36,5 +36,3 @@ def test_gan(gen_features, disc_features):
     b, c, h, w, d = out.size()
     assert h == w == d
     assert h == 256
-
-    
