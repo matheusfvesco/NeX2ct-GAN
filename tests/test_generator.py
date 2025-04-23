@@ -1,7 +1,7 @@
 import pytest
 import torch
 import torch.nn as nn
-from lib.models.generator import SimpleGenerator, LinkerGenerator
+from lib.models.generator import DoubleCnnGenerator, DoubleLinkerGenerator
 from lib.models.basic_blocks import EncoderBlock
 from lib.models.convnext import ConvnextBlock
 from lib.utils.viz import ArrayDisplayUtility
@@ -28,7 +28,7 @@ def test_simple_generator(features, block):
     x2 = x2.to("cuda")
 
     blocks = block_factory(block)
-    generator = SimpleGenerator(
+    generator = DoubleCnnGenerator(
         features=features,
         permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]),
         blocks=blocks,
@@ -93,7 +93,7 @@ def test_linker_generator(features, block):
     x2 = x2.to("cuda")
 
     blocks = block_factory(block)
-    generator = LinkerGenerator(
+    generator = DoubleLinkerGenerator(
         features=features,
         permute_order=([0, 1, 2, 3, 4], [0, 1, 2, 3, 4]),
         blocks=blocks,
