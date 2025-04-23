@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from lib.losses import GANLoss
 from lib.config import Config
+from lib.factories import optim_factory
 
 
 class GanModel(nn.Module):
@@ -23,12 +24,18 @@ class GanModel(nn.Module):
         self.branch_loss = nn.MSELoss()
         self.identity_loss = nn.MSELoss()
 
-        self.g_optim = torch.optim.AdamW(
+        optim = optim_factory(opts.train.optimizer)
+        self.g_optim = optim(
             self.generator.parameters(), lr=opts.generator.lr
         )
-        self.d_optim = torch.optim.AdamW(
+        self.d_optim = optim(
             self.discriminator.parameters(), lr=opts.discriminator.lr
         )
+
+        self.view1_permute = opts.generator.view1_permute
+        self.view2_permute = opts.generator.view2_permute
+
+        self.opts = opts
     
     def train_discriminator_batch(self, x1, x2, g_truth):
         self.discriminator.zero_grad()
@@ -55,7 +62,7 @@ class GanModel(nn.Module):
 
 
 
-    def train_batch(self, x1, x2, g_truth):
+    def train_batch(self, x1: torch.Tensor, x2: torch.Tensor, g_truth: torch.Tensor):
         self.generator.zero_grad()
         self.discriminator.zero_grad()
 
@@ -77,16 +84,21 @@ class GanModel(nn.Module):
         # backward g
         loss_g = self.discriminator(fake_cts)
         loss_g = self.gan_loss(loss_g, False)
+        total_g_loss = loss_g
 
-        identity_loss = self.identity_loss(fake_cts, g_truth)
-
+        # identity loss (fake vs g_truth)
+        if self.opts.generator.identity_loss:
+            identity_loss = self.identity_loss(fake_cts, g_truth)
+            total_g_loss += identity_loss
 
         # branch loss
-        b_loss = self.branch_loss(b1, g_truth)
-        b_loss += self.branch_loss(b2, g_truth)
-        b_loss = b_loss / 2
-
-        total_g_loss = identity_loss + loss_g
+        if self.opts.generator.branch_loss:
+            permute1 = tuple(torch.argsort(torch.Tensor(self.view1_permute)))
+            permute2 = tuple(torch.argsort(torch.Tensor(self.view2_permute)))
+            b_loss = self.branch_loss(b1, g_truth.permute(permute1))
+            b_loss += self.branch_loss(b2, g_truth.permute(permute2))
+            b_loss = b_loss / 2
+            total_g_loss += b_loss
 
         total_g_loss.backward()
         self.g_optim.step()
