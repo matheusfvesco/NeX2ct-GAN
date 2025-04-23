@@ -23,6 +23,8 @@ harpia
 │   ├── classification
 │   └── gan
 ├── output # folder where outputs will be saved
+│   └── preprocess
+│       └── GAN-dataset # processed dataset
 ```
 
 Ensure all of the datasets are properly downloaded from TCIA. Inside each dataset folder, there should be directories named after the patient ids (e.g., `data/LIDC-IDRI/LIDC-IDRI-0001`, `data/MIDRC-RICORD-1A/MIDRC-RICORD-1A-419639-000082`).
@@ -79,6 +81,10 @@ python preprocess.py
 This should create multiple h5 files located at `preprocess/GAN-dataset`.
 
 ### 2. Training
+
+```
+python train.py experiments/{experiment}.yml
+```
 
 ### 3. Testing
 
