@@ -3,11 +3,11 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
-from lib.datasets import CTFactory
+from lib.factories import CTFactory
 from lib.config import Config
 from lib.models.gan import GanModel
 from lib.transforms import Resize, Normalize
-from lib.models.generator import SimpleGenerator
+from lib.models.generator import DoubleCnnGenerator
 from lib.discriminator import Discriminator
 from lib.utils.utils import collate_fn
 from lib.logging import setup_logger
@@ -31,18 +31,14 @@ def main(opts: Config):
 
     ckpt_path = Path("models/gan")
     ckpt_path.mkdir(parents=True, exist_ok=True)
-    latest_path = ckpt_path / (
-        "_".join([p for p in opts.experiment_name.split()])
-    )
+    latest_path = ckpt_path / ("_".join([p for p in opts.experiment_name.split()]))
     latest_path.mkdir(parents=True, exist_ok=True)
     latest_path = latest_path / "latest.ckpt"
 
-    best_path = ckpt_path / (
-        "_".join([p for p in opts.experiment_name.split()])
-    )
+    best_path = ckpt_path / ("_".join([p for p in opts.experiment_name.split()]))
     best_path.mkdir(parents=True, exist_ok=True)
     best_path = best_path / "best.ckpt"
-    
+
     continue_training = opts.continue_t and os.path.exists(latest_path)
 
     data_save_path = Path("output/training-plot") / "-".join(
@@ -93,6 +89,8 @@ def main(opts: Config):
         del data
 
     gan_model = GanModel(generator, discriminator, opts)
+    with open(data_save_path / "model_arch.txt", "w") as f:
+        f.write(f"{gan_model.generator}\n{gan_model.discriminator}")
 
     logger.info(f"training for {opts.epochs} epochs")
     main_pbar = tqdm(range(epochs, opts.epochs))
@@ -103,51 +101,61 @@ def main(opts: Config):
         total_loss_g = 0.0
         total_loss_d = 0.0
 
-        # pretrains discriminator
-        if i == 0:
-            logger.info("Training discriminator for n epochs")
-            pretrain_pbar = tqdm(range(1))
-            for j in pretrain_pbar:
-                pretrain_pbar.set_description(f"Pretrain epoch {j}")
-                epoch_pbar = tqdm(train_loader)
-                for idx, (cts, xr1, xr2, path) in enumerate(epoch_pbar):
-                    cts = cts.to(device)
-                    xr1 = xr1.to(device)
-                    xr2 = xr2.to(device)
+        if opts.disc_warmup:
+            # pretrains discriminator
+            if i == 0:
+                logger.info("Training discriminator for n epochs")
+                pretrain_pbar = tqdm(range(1))
+                for j in pretrain_pbar:
+                    pretrain_pbar.set_description(f"Pretrain epoch {j}")
+                    epoch_pbar = tqdm(train_loader)
+                    for idx, (cts, xr1, xr2, path) in enumerate(epoch_pbar):
+                        cts = cts.to(device)
+                        xr1 = xr1.to(device)
+                        xr2 = xr2.to(device)
 
-                    assert cts.max() == 1
-                    assert cts.min() == 0
+                        assert cts.max() == 1
+                        assert cts.min() == -1
 
-                    assert xr1.max() == 1
-                    assert xr1.min() == 0
-                    assert xr2.max() == 1
-                    assert xr2.min() == 0
+                        assert xr1.max() == 1
+                        assert xr1.min() == -1
+                        assert xr2.max() == 1
+                        assert xr2.min() == -1
 
-                    loss_d = gan_model.train_discriminator_batch(xr1, xr2, cts)
-                    epoch_pbar.set_description(f"loss_d: {loss_d}")
-                    summary.add_scalar("epoch_loss_d", loss_d, global_step=idx)
-                    total_loss_d += loss_d
-                logger.info(f"Loss_d epoch {j}: {total_loss_d / idx}")
-            pretrain_pbar.close()
-        # saves latest
-        torch.save(
-            {
-                "discriminator_w": gan_model.discriminator.state_dict(),
-                "generator_w": gan_model.generator.state_dict(),
-                "epochs": i,
-                "loss_train": total_loss,
-                "best_loss": best_loss,
-            },
-            latest_path,
-        )
+                        loss_d = gan_model.train_discriminator_batch(xr1, xr2, cts)
+                        epoch_pbar.set_description(f"loss_d: {loss_d}")
+                        summary.add_scalar("epoch_loss_d", loss_d, global_step=idx)
+                        total_loss_d += loss_d
+                    logger.info(f"Loss_d epoch {j}: {total_loss_d / idx}")
+                pretrain_pbar.close()
+            # saves latest
+            torch.save(
+                {
+                    "discriminator_w": gan_model.discriminator.state_dict(),
+                    "generator_w": gan_model.generator.state_dict(),
+                    "epochs": i,
+                    "loss_train": total_loss,
+                    "best_loss": best_loss,
+                },
+                latest_path,
+            )
 
-        total_loss_d = 0.0        
+        total_loss_d = 0.0
 
         epoch_pbar = tqdm(train_loader)
         for idx, (cts, xr1, xr2, path) in enumerate(epoch_pbar):
             cts = cts.to(device)
             xr1 = xr1.to(device)
             xr2 = xr2.to(device)
+
+            assert cts.max() == 1
+            assert cts.min() == -1
+
+            assert xr1.max() == 1
+            assert xr1.min() == -1
+            assert xr2.max() == 1
+            assert xr2.min() == -1
+
             loss_g, loss_d = gan_model.train_batch(xr1, xr2, cts)
             summary.add_scalar("epoch_loss_g", loss_g, global_step=idx)
             summary.add_scalar("epoch_loss_d", loss_d, global_step=idx)
@@ -292,13 +300,15 @@ def main(opts: Config):
                 axials_r += ar
                 coronals_r += cr
                 saggitals_r += sr
-            axials = make_grid(torch.stack(axials))
-            coronals = make_grid(torch.stack(coronals))
-            saggitals = make_grid(torch.stack(saggitals))
 
-            axials_r = make_grid(torch.stack(axials_r))
-            coronals_r = make_grid(torch.stack(coronals_r))
-            saggitals_r = make_grid(torch.stack(saggitals_r))
+            # sums 1 and divide by 2 to transform range [-1, 1] to [0, 1]
+            axials = make_grid((torch.stack(axials) + 1) / 2)
+            coronals = make_grid((torch.stack(coronals) + 1) / 2)
+            saggitals = make_grid((torch.stack(saggitals) + 1) / 2)
+
+            axials_r = make_grid((torch.stack(axials_r) + 1) / 2)
+            coronals_r = make_grid((torch.stack(coronals_r) + 1) / 2)
+            saggitals_r = make_grid((torch.stack(saggitals_r) + 1) / 2)
 
             summary.add_image("axials_fake", axials, i)
             summary.add_image("coronals_fake", coronals, i)
@@ -315,6 +325,127 @@ def main(opts: Config):
             save_image(axials_r, image_save_path / f"axials_real_{i}.jpeg")
             save_image(coronals_r, image_save_path / f"coronals_real_{i}.jpeg")
             save_image(saggitals_r, image_save_path / f"saggitals_real_{i}.jpeg")
+
+    i = opts.epochs + 1
+    # saves train set results at the end of training
+    with torch.no_grad():
+        # fakes
+        axials = []
+        coronals = []
+        saggitals = []
+        # reals
+        axials_r = []
+        coronals_r = []
+        saggitals_r = []
+        for idx, (cts, xr1, xr2, path) in enumerate(train_loader):
+            xr1 = xr1.to(device)
+            xr2 = xr2.to(device)
+            fakes = gan_model(xr1, xr2)
+            a = []
+            c = []
+            s = []
+
+            ar = []
+            cr = []
+            sr = []
+            for fake, g_truth in zip(fakes, cts):
+                # now HWD
+                fake = fake.squeeze()
+                g_truth = g_truth.squeeze()
+                fake_mid = fake.shape[-1] // 2
+                real_mid = g_truth.shape[-1] // 2
+
+                # Appends fake images for batch with 3 channels
+                a.append(
+                    torch.stack(
+                        [
+                            fake[fake_mid, :, :],
+                            fake[fake_mid, :, :],
+                            fake[fake_mid, :, :],
+                        ]
+                    )
+                )
+                c.append(
+                    torch.stack(
+                        [
+                            fake[:, fake_mid, :],
+                            fake[:, fake_mid, :],
+                            fake[:, fake_mid, :],
+                        ]
+                    )
+                )
+                s.append(
+                    torch.stack(
+                        [
+                            fake[:, :, fake_mid],
+                            fake[:, :, fake_mid],
+                            fake[:, :, fake_mid],
+                        ]
+                    )
+                )
+
+                # Append real images for the batch with 3 channels
+                sr.append(
+                    torch.stack(
+                        [
+                            g_truth[real_mid, :, :],
+                            g_truth[real_mid, :, :],
+                            g_truth[real_mid, :, :],
+                        ]
+                    )
+                )
+                cr.append(
+                    torch.stack(
+                        [
+                            g_truth[:, real_mid, :],
+                            g_truth[:, real_mid, :],
+                            g_truth[:, real_mid, :],
+                        ]
+                    )
+                )
+                ar.append(
+                    torch.stack(
+                        [
+                            g_truth[:, :, real_mid],
+                            g_truth[:, :, real_mid],
+                            g_truth[:, :, real_mid],
+                        ]
+                    )
+                )
+            # sum lists
+            axials += a
+            coronals += c
+            saggitals += s
+
+            axials_r += ar
+            coronals_r += cr
+            saggitals_r += sr
+
+        # sums 1 and divide by 2 to transform range [-1, 1] to [0, 1]
+        axials = make_grid((torch.stack(axials) + 1) / 2)
+        coronals = make_grid((torch.stack(coronals) + 1) / 2)
+        saggitals = make_grid((torch.stack(saggitals) + 1) / 2)
+
+        axials_r = make_grid((torch.stack(axials_r) + 1) / 2)
+        coronals_r = make_grid((torch.stack(coronals_r) + 1) / 2)
+        saggitals_r = make_grid((torch.stack(saggitals_r) + 1) / 2)
+
+        summary.add_image("axials_fake", axials, i)
+        summary.add_image("coronals_fake", coronals, i)
+        summary.add_image("saggitals_fake", saggitals, i)
+
+        summary.add_image("axials_real", axials_r, i)
+        summary.add_image("coronals_real", coronals_r, i)
+        summary.add_image("saggitals_real", saggitals_r, i)
+
+        save_image(axials, image_save_path / f"axials_fake_{i}.jpeg")
+        save_image(coronals, image_save_path / f"coronals_fake_{i}.jpeg")
+        save_image(saggitals, image_save_path / f"saggitals_fake_{i}.jpeg")
+
+        save_image(axials_r, image_save_path / f"axials_real_{i}.jpeg")
+        save_image(coronals_r, image_save_path / f"coronals_real_{i}.jpeg")
+        save_image(saggitals_r, image_save_path / f"saggitals_real_{i}.jpeg")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
