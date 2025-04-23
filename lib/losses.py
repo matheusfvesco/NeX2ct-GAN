@@ -7,8 +7,8 @@ class GANLoss(nn.Module):
         super().__init__(*args, **kwargs)
 
         self.device = device
-        self.real_label = 1.0
-        self.fake_label = 0.0
+        self.real_label = 0.1
+        self.fake_label = 0.9
         self.loss = nn.MSELoss()
     
     def get_target(self, preds, is_real):
