@@ -60,6 +60,7 @@ def main(args):
             "AP": "frontal",
             "PA": "frontal",
             "LL": "lateral",
+            "LAT": "lateral",
         }
         dcm = dcmread(path)
         view_type = dcm.get("ViewPosition", "")
