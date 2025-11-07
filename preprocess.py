@@ -29,7 +29,7 @@ DATA_ROOT = Path("data")
 SAVE_ROOT = Path("preprocess/GAN-dataset")
 SAVE_ROOT = Path("preprocess/GAN-dataset-complete-new")
 DATASETS = ["MIDRC-RICORD-1A", "MIDRC-RICORD-1C", "LIDC-IDRI"]
-DATASETS = ["complete_gan_dataset"]
+DATASETS = ["gan_dataset"]
 
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -265,17 +265,20 @@ for patient in dataset:
         logger.debug("No CT scans found for this patient. Skipping...")
         continue
 
-    patient_output_file = SAVE_ROOT / (patient + ".h5")
+    patient_output_file = SAVE_ROOT / patient / "ct_xray_data.h5"
     if (
         patient_output_file.exists()
     ):  # if the file already exists, skip it to avoid overwriting
         logger.debug(f"'{patient_output_file}' already exists. Skipping...")
         continue
     logger.debug("Writing patient data to disk...")
-    PatientDataStorer(
-        patient_id=patient, patient_data_dictionary=dataset[patient]
-    ).store_to_file(dirpath=SAVE_ROOT, compression="lzf")
-    logger.debug("Finished writing patient data to disk.")
+    try:
+        PatientDataStorer(
+            patient_id=patient, patient_data_dictionary=dataset[patient]
+        ).store_to_file(dirpath=SAVE_ROOT, compression="lzf")
+        logger.debug("Finished writing patient data to disk.")
+    except Exception as e:
+        logger.error(f"An exception ocurred while processing the patient. Exception: {e}")
 
     logger.debug("Clearing cache...")
     ct_scans: list[CTScanDirectory] = dataset[patient]["cts"]

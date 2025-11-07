@@ -69,15 +69,18 @@ class DicomDataset:
                 dcm_paths = list(Path(dirpath).glob("*.dcm"))
                 if not dcm_paths:
                     continue
-                directory = DicomDirectory(dirpath)
-                patient_id: str = directory.dataset_agnostic_patient_id
-                if directory.is_multiview:
-                    self[patient_id]["multiview"].append(directory)
-                if directory.is_ct:
-                    if directory.is_valid_scan and directory.is_axial:
-                        self.dataset[patient_id]["cts"].append(directory)
-                if directory.is_singleview:
-                    self[patient_id]["xrays"].append(directory)
+                try:
+                    directory = DicomDirectory(dirpath)
+                    patient_id: str = directory.dataset_agnostic_patient_id
+                    if directory.is_multiview:
+                        self[patient_id]["multiview"].append(directory)
+                    if directory.is_ct:
+                        if directory.is_valid_scan and directory.is_axial:
+                            self.dataset[patient_id]["cts"].append(directory)
+                    if directory.is_singleview:
+                        self[patient_id]["xrays"].append(directory)
+                except Exception as e:
+                    continue
             single_dataset_bar.close()
         self.logger.info("Success!\n\n")
         datasets_bar.close()
