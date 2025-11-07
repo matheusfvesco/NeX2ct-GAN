@@ -480,3 +480,8 @@ class CTProcessor(BaseProcessor):
                 self.array = np.insert(self.array,0, np.zeros((512,512)),axis=2)
         if self.array.shape[-1] != 100:
             raise ValueError("Shape is different than 100")
+
+    def _transpose(self):
+        arr = self.array
+        self.array = np.transpose(arr, axes=(2, 0, 1))
+        return

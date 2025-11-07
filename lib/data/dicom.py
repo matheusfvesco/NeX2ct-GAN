@@ -11,6 +11,7 @@ from lib.dicom import (
 from lib.logging import setup_logger
 import os
 import csv
+import json
 
 
 class DicomDataset:
@@ -37,6 +38,9 @@ class DicomDataset:
 
     def __setitem__(self, key, value):
         self.dataset[key] = value
+
+    def __delitem__(self, key):
+        del self.dataset[key]
 
     def keys(self):
         return self.dataset.keys()
@@ -85,6 +89,9 @@ class DicomDataset:
         if not self.dataset:
             raise ValueError("The dataset haven't been loaded yet")
         self.logger.info("Filtering invalid CTs and sorting by the amount of slices...")
+
+        with open("data/patient-selection-annotation.json") as f:
+            selection_annotations: dict = json.load(f)
         dataset_bar = tqdm(sorted(self.keys()))
         for patient in dataset_bar:
             dataset_bar.set_description(patient)
@@ -93,6 +100,12 @@ class DicomDataset:
                 or self[patient] == self._create_default_patient_dict()
             ):
                 raise ValueError(f"The dataset {patient} is empty")
+            if patient not in selection_annotations.keys():
+                del self[patient]
+                continue
+            if selection_annotations[patient] != "selected":
+                del self[patient]
+                continue
             ct_scans: list[CTScanDirectory] = self[patient]["cts"]
             singleview_dirs: list[SingleViewXRayDirectory] = self[patient]["xrays"]
             multiview_dirs: list[MultiviewXRayDirectory] = self[patient]["multiview"]
