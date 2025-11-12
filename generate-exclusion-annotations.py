@@ -20,9 +20,9 @@ def process_directory(root_path: Path):
         class_path = root_path / class_name
         if not class_path.exists() or not class_path.is_dir():
             raise ValueError(f"{class_path} doesn't exist or is not a directory")
-        for file in class_path.glob("*.jpeg"):
+        for file in class_path.glob("*-ct.jpeg"):
             # Remove the .jpeg suffix
-            patient_id = file.stem
+            patient_id = file.stem.replace("-ct", "")
 
             # adding the patient_id as the key and the value its class
             data[patient_id] = class_name
