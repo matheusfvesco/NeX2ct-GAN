@@ -21,11 +21,13 @@ def main(args):
     paired = []
     complete = []
     for filepath in sorted(list(DATA_ROOT.rglob("*.h5"))):
+        #print(filepath)
         file = HDF5FileHandler(filepath)
         keys = list(file.file.keys())
-        complete.append(filepath.name)
+        complete.append(filepath.parent.name)
+        #print(complete[-1])
         if "real_xray1" in keys and "real_xray2" in keys:
-            paired.append(filepath.name)
+            paired.append(filepath.parent.name)
 
     paired = set(paired)
     complete = set(complete)
@@ -54,6 +56,7 @@ def main(args):
 
     with open(SAVE_PATH/"train_real.txt", "w") as f:
         samples = sorted(list(train_real))
+        print(samples)
         lines = [f"{line}\n" for line in samples]
         f.writelines(lines)
 
