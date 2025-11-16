@@ -44,25 +44,19 @@ pip install -r requirements.txt
 
 ### 1. Data preprocessing
 
-To run data preprocessing:
-
-```bash
-python preprocess.py --input "data" --output "outputs/preprocess/gan-dataset"
-```
-
-#### 1.2. (optional) Checking x-ray annotations or annotating them 
+#### 1.0.(optional) Checking x-ray annotations or annotating them 
 
 Some datasets don't have annotations for the x-ray views. You can either check the annotations provided with the repository (`data/xrays-view-annotation.json`) or manually annotate them.
 
 To check the annotations, use:
 ```bash
-python manually-annotate-xray-views.py --datasets "LIDC-IDRI,MIDRC-RICORD-1A,MIDRC-RICORD-1C" --root "data" --savepath "output/temporary-files/xrays-manual-annotation" --check
+python manually-annotate-xray-views.py --datasets "gan_dataset" --root "data" --savepath "output/temporary-files/xrays-manual-annotation" --check
 ```
 This will save jpeg thumbnails of the views inside the specified savepath using the already provided json file. You can inspect the folders `frontal` and `lateral` and check if the views are correctly annotated.
 
 To annotate, use:
 ```bash
-python manually-annotate-xray-views.py --datasets "LIDC-IDRI,MIDRC-RICORD-1A,MIDRC-RICORD-1C" --root "data" --savepath "output/temporary-files/xrays-manual-annotation"
+python manually-annotate-xray-views.py --datasets "gan_dataset" --root "data" --savepath "output/temporary-files/xrays-manual-annotation"
 ```
 
 This will create 2 folders inside the savepath: `frontal` and `lateral`. Inside each folder, jpeg thumbnails of the x-ray views will be created using the existent annotation in the tags. Alongside the folders, thumbnails of the views without annotations will be created. Simply drag the thumbnails to their correct folder. Then run:
@@ -71,21 +65,31 @@ python generate-xray-annotations.py
 ```
 This should create a json file inside the data folder with all the annotations for each x-ray view in the dataset.
 
-#### 1.3. Dataset Preparation
+#### 1.1. Dataset Preparation
 
 To preprocess the dataset, run
 ```bash
 python preprocess.py
 ```
 
-This should create multiple h5 files located at `preprocess/GAN-dataset`.
+This should create multiple h5 files located at `output/preprocess/GAN-dataset-complete`, following the structure `patient_id / ct_xray_data.h5`.
 
-### 2. Training
+#### 1.2. Dataset patching
 
+To create the real data only version of the dataset, run
+```bash
+python paper-figure-scripts/patch_dataset.py output/preprocess/GAN-dataset-complete output/preprocess/GAN-dataset-complete-real
 ```
-python train.py experiments/{experiment}.yml
+
+This should create a new version of the dataset located at `output/preprocess/GAN-dataset-complete-real`.
+
+#### 1.3. Dataset splitting
+
+Run the following commands to create dataset splits inside the `splits/` directory
+```bash
+python paper-figure-scripts/split_samples.py output/preprocess/GAN-dataset-complete splits synthetic 0.1
 ```
 
-### 3. Testing
-
-### 4. Inference
+```bash
+python paper-figure-scripts/split_samples.py output/preprocess/GAN-dataset-complete-real splits real 0.1
+```
