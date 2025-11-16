@@ -1,84 +1,74 @@
-"""
-Divides into train and test sets. Ensures synthetic test is defined by real_test + n% synthetic
+"""Divide samples into train and test sets using only folder names.
+
+This script no longer inspects HDF5 internal keys. It collects patient/sample
+folder names by finding all ``*.h5`` files under ``root_path`` and using the
+parent folder name as the sample identifier.
+
+Usage (positional args):
+    root_path save_path test_size prefix
+
+Outputs two files written to ``save_path``:
+    {prefix}_train.txt
+    {prefix}_test.txt
+
+The splitting is reproducible: it seeds Python's ``random`` with 42, shuffles
+the (sorted) list of samples, selects the first N as test (N = floor(test_size * n)),
+and writes sorted lists to the output files.
 """
 
-from lib.io import HDF5FileHandler
 import random
 from pathlib import Path
 import argparse
 
+
 def main(args):
+    # Reproducible shuffle
     random.seed(42)
-    #SAVE_PATH = Path("splits")
+
     SAVE_PATH = Path(args.save_path)
-    #DATA_ROOT = Path("preprocess/GAN-dataset")
     DATA_ROOT = Path(args.root_path)
-
-    #test_size = 0.05
     test_size = args.test_size
+    prefix = args.prefix
 
-
-    paired = []
-    complete = []
+    # Collect sample names from parent folder names of any .h5 files
+    samples = []
     for filepath in sorted(list(DATA_ROOT.rglob("*.h5"))):
-        #print(filepath)
-        file = HDF5FileHandler(filepath)
-        keys = list(file.file.keys())
-        complete.append(filepath.parent.name)
-        #print(complete[-1])
-        if "real_xray1" in keys and "real_xray2" in keys:
-            paired.append(filepath.parent.name)
+        samples.append(filepath.parent.name)
 
-    paired = set(paired)
-    complete = set(complete)
+    # Unique sample names
+    samples = sorted(set(samples))
 
-    synthetic_only = complete.difference(paired)
+    # Deterministic shuffle then split
+    random.shuffle(samples)
+    test_count = int(test_size * len(samples))
+    test_set = set(samples[:test_count])
+    train_set = set(samples[test_count:])
 
-    paired_list = sorted(list(paired))
-    random.shuffle(paired_list)
-    test_real_size = int(test_size * len(paired_list))
-    test_real = set(paired_list[:test_real_size])
-    train_real = set(paired_list[test_real_size:])
+    # Sanity: disjoint and cover all
+    assert test_set.isdisjoint(train_set)
+    assert test_set.union(train_set) == set(samples)
 
-    synthetic_list = sorted(list(synthetic_only))
-    random.shuffle(synthetic_list)
-    test_synthetic_size = int(test_size * len(synthetic_list))
-    test_synthetic_part = set(synthetic_list[:test_synthetic_size])
+    # Write outputs (sorted in output files)
+    SAVE_PATH.mkdir(parents=True, exist_ok=True)
 
-    # test synthetic = test_real + n% of synthetic samples
-    test_synthetic = test_real.union(test_synthetic_part)
-
-
-    train_synthetic = complete - test_synthetic
-
-    assert test_real.issubset(test_synthetic)
-
-
-    with open(SAVE_PATH/"train_real.txt", "w") as f:
-        samples = sorted(list(train_real))
-        print(samples)
-        lines = [f"{line}\n" for line in samples]
+    with open(SAVE_PATH / f"{prefix}_train.txt", "w") as f:
+        out = sorted(list(train_set))
+        lines = [f"{line}\n" for line in out]
         f.writelines(lines)
 
-    with open(SAVE_PATH/"test_real.txt", "w") as f:
-        samples = sorted(list(test_real))
-        lines = [f"{line}\n" for line in samples]
+    with open(SAVE_PATH / f"{prefix}_test.txt", "w") as f:
+        out = sorted(list(test_set))
+        lines = [f"{line}\n" for line in out]
         f.writelines(lines)
 
-    with open(SAVE_PATH/"train_synthetic.txt", "w") as f:
-        samples = sorted(list(train_synthetic))
-        lines = [f"{line}\n" for line in samples]
-        f.writelines(lines)
-
-    with open(SAVE_PATH/"test_synthetic.txt", "w") as f:
-        samples = sorted(list(test_synthetic))
-        lines = [f"{line}\n" for line in samples]
-        f.writelines(lines)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("root_path")
     parser.add_argument("save_path")
-    parser.add_argument("test_size",type=float)
+    parser.add_argument(
+        "prefix", help="dataset prefix for output files, e.g. 'synthetic'"
+    )
+    parser.add_argument("test_size", type=float)
     args = parser.parse_args()
     main(args)
