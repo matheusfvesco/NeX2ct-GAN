@@ -300,7 +300,7 @@ class PatientDataStorer:
                         age = lateral_view.dicom.get("PatientAge")
 
         h5f = HDF5FileHandler(
-            filepath=dirpath / self.patient_id / + "ct_xray_data.h5", compression=compression
+            filepath=dirpath / self.patient_id / "ct_xray_data.h5", compression=compression
         )
 
         # gets array with N slices
