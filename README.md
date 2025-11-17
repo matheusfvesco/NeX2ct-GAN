@@ -44,7 +44,7 @@ pip install -r requirements.txt
 
 ### 1. Data preprocessing
 
-#### 1.0.(optional) Checking x-ray annotations or annotating them 
+#### 1.0. (optional) Checking x-ray annotations or annotating them 
 
 Some datasets don't have annotations for the x-ray views. You can either check the annotations provided with the repository (`data/xrays-view-annotation.json`) or manually annotate them.
 
@@ -83,7 +83,26 @@ python paper-figure-scripts/patch_dataset.py output/preprocess/GAN-dataset-compl
 
 This should create a new version of the dataset located at `output/preprocess/GAN-dataset-complete-real`.
 
-#### 1.3. Dataset splitting
+#### 1.3. (optional) Dataset preview
+
+To preview the datasets, use the following commands:
+
+```bash
+python3 paper-figure-scripts/preview-processed-dataset.py \
+    output/preprocess/GAN-dataset-complete \
+    output/preview/data/GAN-dataset-complete
+```
+This should create jpeg visualizations of the complete dataset
+
+Run
+```bash
+python3 paper-figure-scripts/preview-processed-dataset.py \
+    output/preprocess/GAN-dataset-complete-real \
+    output/preview/data/GAN-dataset-complete-real
+```
+To preview the patched dataset inside the directory `output/preview/data/GAN-dataset-complete-real`
+
+#### 1.4. Dataset splitting
 
 Run the following commands to create dataset splits inside the `splits/` directory
 ```bash
