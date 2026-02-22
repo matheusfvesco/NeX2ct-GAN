@@ -295,9 +295,9 @@ class XRayProcessor(BaseProcessor):
 
     def _get_photometric_information(self):
         self.photometric = self.dicom.get("PhotometricInterpretation")
-    
+
     def _resize(self):
-        self.array = cv2.resize(self.array,(RESIZE_SIZE, RESIZE_SIZE))
+        self.array = cv2.resize(self.array, (RESIZE_SIZE, RESIZE_SIZE))
 
 
 class CTProcessor(BaseProcessor):
@@ -323,7 +323,7 @@ class CTProcessor(BaseProcessor):
         self._rescale()
         self._set_max_to_min()
         self._normalize()
-        #self._resize()
+        # self._resize()
 
         return self.array
 
@@ -429,17 +429,31 @@ class CTProcessor(BaseProcessor):
     def _apply_windowing(self):
         """Applies windowing based on the stored window center and width."""
 
-        if self.window_center is not None and self.window_width is not None:
-            lower_bound = self.window_center - (self.window_width / 2)
-            upper_bound = self.window_center + (self.window_width / 2)
+        # By default, apply windowing as a clip in HU space and do NOT
+        # rescale to 0-255. Use `rescale=True` if you need the output
+        # to be mapped to the [0,255] range (keeps backward-compat).
+        def _apply(rescale: bool = False):
+            if self.window_center is not None and self.window_width is not None:
+                lower_bound = self.window_center - (self.window_width / 2)
+                upper_bound = self.window_center + (self.window_width / 2)
 
-            self.array = np.clip(self.array, lower_bound, upper_bound)
-            self.array = np.interp(self.array, [lower_bound, upper_bound], [0, 255])
-        else:
-            raise ValueError(
-                "Window center and width are not set. Cannot apply windowing."
-            )
-    
+                # Clip values to the requested HU window
+                self.array = np.clip(self.array, lower_bound, upper_bound)
+
+                # Optionally rescale clipped values to 0-255
+                if rescale:
+                    # Use interpolation to map [lower_bound, upper_bound] -> [0,255]
+                    self.array = np.interp(
+                        self.array, [lower_bound, upper_bound], [0, 255]
+                    )
+            else:
+                # If no windowing information is present, do nothing. This
+                # keeps callers simpler (no exceptions) and preserves HU.
+                return
+
+        # expose a simple API: call _apply() without args to clip in HU space
+        _apply(rescale=False)
+
     def _resize(self):
         """
         Resizes de number of slices to 100 slices. If there are more slices,
@@ -448,17 +462,21 @@ class CTProcessor(BaseProcessor):
         """
         arr = torch.Tensor(self.array)
         arr = arr.unsqueeze(0).unsqueeze(0)
-        arr = torch.nn.functional.interpolate(arr,size=(RESIZE_SIZE,RESIZE_SIZE,RESIZE_SIZE), mode="trilinear")
+        arr = torch.nn.functional.interpolate(
+            arr, size=(RESIZE_SIZE, RESIZE_SIZE, RESIZE_SIZE), mode="trilinear"
+        )
         arr = arr.squeeze()
         self.array = arr.numpy()
         for shape in self.array.shape:
             if shape == RESIZE_SIZE:
                 continue
-            ValueError(f"Shape ({self.array.shape}) is different than ({RESIZE_SIZE},{RESIZE_SIZE},{RESIZE_SIZE})")
+            ValueError(
+                f"Shape ({self.array.shape}) is different than ({RESIZE_SIZE},{RESIZE_SIZE},{RESIZE_SIZE})"
+            )
         return
 
         # resizes to 100 slices
-        slcs = [cv2.resize(slc,(512, 512)) for slc in self.array] # was (100,512)
+        slcs = [cv2.resize(slc, (512, 512)) for slc in self.array]  # was (100,512)
         self.array = np.stack(slcs)
         if self.array.shape[-1] != 512:
             raise ValueError("Shape is different than 100")
@@ -467,7 +485,7 @@ class CTProcessor(BaseProcessor):
         # resizes to 100 slices if > 100 slices, else add padding
         if self.array.shape[-1] > 100:
             # resizes
-            slcs = [cv2.resize(slc,(100, 512)) for slc in self.array]
+            slcs = [cv2.resize(slc, (100, 512)) for slc in self.array]
             self.array = np.stack(slcs)
         else:
             # adds padding
@@ -475,9 +493,9 @@ class CTProcessor(BaseProcessor):
             top = (diff // 2) + (diff % 2)
             bottom = diff // 2
             for i in range(top):
-                self.array = np.insert(self.array,-1, np.zeros((512,512)),axis=2)
+                self.array = np.insert(self.array, -1, np.zeros((512, 512)), axis=2)
             for i in range(bottom):
-                self.array = np.insert(self.array,0, np.zeros((512,512)),axis=2)
+                self.array = np.insert(self.array, 0, np.zeros((512, 512)), axis=2)
         if self.array.shape[-1] != 100:
             raise ValueError("Shape is different than 100")
 

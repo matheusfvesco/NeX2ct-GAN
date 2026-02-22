@@ -21,6 +21,7 @@ from lib.utils.utils import degrees_to_radians
 
 RESIZE_SIZE = 256
 
+
 class DRRGenerator:
     def __init__(
         self,
@@ -40,12 +41,8 @@ class DRRGenerator:
                 custom_process_order
             )
         self.spacing = np.array(list(ctdirectory.spacing))
-        self.frontal_view = self._to_numpy(self.generate_drr_from_string("frontal"))
-        self.lateral_view = self._to_numpy(self.generate_drr_from_string("lateral"))
-
-    @staticmethod
-    def _to_numpy(tensor: torch.Tensor) -> np.ndarray:
-        return tensor.squeeze().cpu().numpy()
+        self.frontal_view = self.generate_drr_from_string("frontal")
+        self.lateral_view = self.generate_drr_from_string("lateral")
 
     def show_drr_by_string(self, view_type: str = "frontal", window_name: str = ""):
         if not isinstance(view_type, str):
@@ -64,13 +61,7 @@ class DRRGenerator:
         if not window_name or not isinstance(window_name, str):
             window_name = "DRR"
 
-        # Normalize the array to 0-255
-        normalized_array = cv2.normalize(
-            array, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
-        )
-
-        # Display the image
-        cv2.imshow(window_name, normalized_array)
+        cv2.imshow(window_name, array)
         cv2.waitKey(0)
         cv2.destroyAllWindows()
 
@@ -100,13 +91,7 @@ class DRRGenerator:
 
     @staticmethod
     def _write_array_to_disk(array: np.ndarray, path: Path):
-        # Normalize the array to 0-255
-        normalized_array = cv2.normalize(
-            array, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
-        )
-
-        # Write the image to the specified path
-        cv2.imwrite(str(path), normalized_array)
+        cv2.imwrite(str(path), array)
 
     @staticmethod
     def _generate_raw_drr(
@@ -187,7 +172,7 @@ class DRRGenerator:
 
         return img
 
-    def generate_drr_from_string(self, view_type: str) -> torch.tensor:
+    def generate_drr_from_string(self, view_type: str) -> np.ndarray:
         if view_type == "frontal":
             theta = degrees_to_radians(180)  # (8 / 8) * torch.pi
             phi = degrees_to_radians(0)  # 0
@@ -218,10 +203,8 @@ class DRRGenerator:
         )
 
         img = img.squeeze().cpu().numpy()
-        #img = img.squeeze().cpu()
-        img = cv2.resize(img,dsize=(RESIZE_SIZE, RESIZE_SIZE))
-        img = torch.Tensor(img).to(torch.float64)
-        img = (img - img.min()) / (img.max() - img.min())
-        assert img.max() == 1, f"{img.max()}, {img.min()}"
-
+        img = cv2.resize(img, dsize=(RESIZE_SIZE, RESIZE_SIZE))
+        img = cv2.normalize(
+            img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
+        )
         return img

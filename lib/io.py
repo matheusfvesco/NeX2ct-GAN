@@ -104,7 +104,7 @@ class HDF5FileHandler:
         if key in self.file:
             del self.file[key]
         self.file.create_dataset(key, data=array, compression=self.compression)
-    
+
     def store_dict(self, key: str, dict: dict, force: bool = False):
         if not self.is_writable and not force:
             raise ValueError(
@@ -118,7 +118,7 @@ class HDF5FileHandler:
                 self._open_in_mode("write")
         if key in self.file:
             del self.file[key]
-    
+
         # Create a group for the top-level key
         group = self.file.create_group(key)
 
@@ -300,25 +300,43 @@ class PatientDataStorer:
                         age = lateral_view.dicom.get("PatientAge")
 
         h5f = HDF5FileHandler(
-            filepath=dirpath / self.patient_id / "ct_xray_data.h5", compression=compression
+            filepath=dirpath / self.patient_id / "ct_xray_data.h5",
+            compression=compression,
         )
 
-        # gets array with N slices
-        ct_volume = ct_scan.get_array()
+        # get the raw CT array (preserves original pixel values)
+        # and convert it to Hounsfield Units (HU) without applying
+        # the full `process()` pipeline (which would rescale/normalize)
+        ct_raw = ct_scan.get_raw_array()
+        #print("[Step 1 – Raw array] min:", ct_raw.min(), "max:", ct_raw.max())
 
-        
+        # Step 2 – Initialise processor (no processing yet)
+        ct_processor = CTProcessor(ct_raw, ct_scan.dicom)
+        #print("[Step 2 – Processor init] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
-        # resizes the CT volumes to standard number of slices
-        # if resizing made during preprocess, pixel spacing would be wrong during
-        # drr generation
-        ct_volume = CTProcessor(ct_volume, None)
-        try:
-            ct_volume._apply_windowing()
-        except Exception as e:
-            pass
-        ct_volume._transpose()
-        ct_volume._resize() # keep same size, resize during training (trilinear)
-        ct_volume = ct_volume.array
+        # Step 3 – Convert raw values to Hounsfield Units (HU)
+        ct_processor._raw_array_to_hu()
+        #print("[Step 3 – Raw→HU] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+
+        # Step 4 – Apply windowing (if available)
+        #try:
+        #    ct_processor._apply_windowing()
+        #    print("[Step 4 – Windowing] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+        #except Exception:
+        #    print("[Step 4 – Windowing] no windowing info, array unchanged")
+        #    pass
+
+        # Step 5 – Transpose axes
+        ct_processor._transpose()
+        #print("[Step 5 – Transpose] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+
+        # Step 6 – Resize (kept same size here)
+        ct_processor._resize()
+        #print("[Step 6 – Resize] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+
+        # Final volume ready for downstream use
+        ct_volume = ct_processor.array
+        #print("[Final] CT volume shape:", ct_volume.shape, "min:", ct_volume.min(), "max:", ct_volume.max())
 
         metadata = {}
         dcm = ct_scan.dicom.dicom
