@@ -6,6 +6,7 @@ from pydicom import FileDataset
 from pydicom.multival import MultiValue
 from pydicom.valuerep import DSfloat
 from collections import defaultdict
+import nibabel as nib
 
 import numpy as np
 
@@ -777,6 +778,78 @@ class CTScanDirectory(BaseDicomDir):
         )
         return z_position_sorted != name_sorted
 
+    @property
+    @get_middle_dicom_filedataset
+    def affine(self, dicom: CTSlice) -> np.ndarray:
+        """
+        Generates a 4x4 affine matrix for the CT volume.
+        """
+        # Get all dicoms and sort them by z position descending
+        # This matches the order in _get_raw_array when use_z_ordering=True and reverse_order=False
+        dicoms = list(self)
+        dicoms_sorted = sorted(dicoms, key=lambda d: d.z, reverse=True)
+
+        if not dicoms_sorted:
+            return np.eye(4)
+
+        first = dicoms_sorted[0]
+        last = dicoms_sorted[-1]
+
+        n = len(dicoms_sorted)
+
+        # ImageOrientationPatient is a list of 6 floats: [i1, i2, i3, i4, i5, i6]
+        # i1, i2, i3 are the row direction cosine
+        # i4, i5, i6 are the column direction cosine
+        orientation = dicom.image_orientation_patient
+        if orientation is None:
+            orientation = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+        else:
+            orientation = [float(x) for x in orientation]
+
+        i1, i2, i3, i4, i5, i6 = orientation
+
+        # Pixel spacing is (row_spacing, col_spacing)
+        dr, dc = dicom.pixel_spacing
+
+        # ImagePositionPatient is (x, y, z)
+        t1 = [float(x) for x in first.image_position_patient]
+        tn = [float(x) for x in last.image_position_patient]
+
+        affine = np.zeros((4, 4))
+
+        # Column 0: row direction cosine * row spacing
+        affine[0, 0] = i4 * dr
+        affine[1, 0] = i5 * dr
+        affine[2, 0] = i6 * dr
+
+        # Column 1: column direction cosine * column spacing
+        affine[0, 1] = i1 * dc
+        affine[1, 1] = i2 * dc
+        affine[2, 1] = i3 * dc
+
+        # Column 2: slice step
+        if n > 1:
+            affine[0, 2] = (tn[0] - t1[0]) / (n - 1)
+            affine[1, 2] = (tn[1] - t1[1]) / (n - 1)
+            affine[2, 2] = (tn[2] - t1[2]) / (n - 1)
+        else:
+            # Fallback for single slice
+            affine[0, 2] = 0.0
+            affine[1, 2] = 0.0
+            affine[2, 2] = 1.0
+
+        # Column 3: origin
+        affine[0, 3] = t1[0]
+        affine[1, 3] = t1[1]
+        affine[2, 3] = t1[2]
+        affine[3, 3] = 1.0
+
+        # Convert from DICOM LPS+ to NIfTI RAS+
+        affine[0, :] = -affine[0, :]
+        affine[1, :] = -affine[1, :]
+
+        return affine
+
     @get_middle_dicom_filedataset
     def _get_windowing_information(self, dicom: CTSlice, index: int = 0):
         return dicom._get_windowing_information(index=index)
@@ -818,13 +891,15 @@ class CTScanDirectory(BaseDicomDir):
     def _get_array(self) -> np.ndarray:
         array = self._get_raw_array()
         # array = self._preprocess_array(array=array, shift_0=shift_0)
-        array = CTProcessor(array=array, dicom=self.dicom).process()
+        # pass the entire scan directory instead of just a slice
+        array = CTProcessor(array=array, scan=self).process()
         return array
 
     def _get_processor(self, shift_0: bool = True, **kwargs) -> CTProcessor:
         array = self._get_raw_array(**kwargs)
         # array = self._preprocess_array(array=array, shift_0=shift_0)
-        processor = CTProcessor(array=array, dicom=self.dicom)
+        # the processor now expects the scan rather than a single slice
+        processor = CTProcessor(array=array, scan=self)
         return processor
 
     @get_middle_dicom_filedataset

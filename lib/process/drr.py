@@ -30,17 +30,24 @@ class DRRGenerator:
         **kwargs,
     ):
         self.dicom = ctdirectory.dicom
+
+        self.spacing = np.array(list(ctdirectory.spacing))
         if not custom_process_order:
-            self.volume = ctdirectory.get_array()
+            #self.volume = ctdirectory.get_array()
+            processor = CTProcessor(array=ctdirectory.get_raw_array(**kwargs), scan=ctdirectory)
+            self.volume = processor.process()
+            self.spacing = processor.spacing
         else:
             if not kwargs:  # if no kwargs provided, allows the use of cache
                 array = ctdirectory.get_raw_array(**kwargs)
             else:  # if kwargs provided, bypass the cache, reads it from disk again and process directly from raw array
                 array = ctdirectory._get_raw_array(**kwargs)
-            self.volume = CTProcessor(array=array, dicom=self.dicom)._process_compose(
+            # pass full directory so custom processing functions can
+            # inspect scan-level metadata if required
+            self.volume = CTProcessor(array=array, scan=ctdirectory)._process_compose(
                 custom_process_order
             )
-        self.spacing = np.array(list(ctdirectory.spacing))
+        # TODO: replace spacing being taken from ctdirectory to instead use the new spacing from the CTProcessor 
         self.frontal_view = self.generate_drr_from_string("frontal")
         self.lateral_view = self.generate_drr_from_string("lateral")
 

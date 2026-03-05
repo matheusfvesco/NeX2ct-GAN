@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 import h5py
 import numpy as np
+import time
 
 from typing import TYPE_CHECKING
 from lib.process.preprocess import CTProcessor
@@ -158,10 +159,14 @@ class HDF5FileHandler:
         return np.array(self.file[key])
 
 
+# should also take in the logger
 class PatientDataStorer:
-    def __init__(self, patient_id: str, patient_data_dictionary: dict) -> None:
+    def __init__(
+        self, patient_id: str, patient_data_dictionary: dict, logger=None
+    ) -> None:
         self.patient_id = patient_id
         self.data_dictionary = patient_data_dictionary
+        self.logger = logger
         if not self.data_dictionary["cts"]:
             raise ValueError("The provided dictionary does not contain any CT scans")
         self._order_data_dictionary()
@@ -234,9 +239,17 @@ class PatientDataStorer:
         multiview_dirs: list[MultiviewXRayDirectory] = self.data_dictionary["multiview"]
 
         ct_scan = ct_scans[0]
+        # logs starting to generate DRRs
+        start_time = time.time()
         drr_generator = ct_scan.drr_generator
+        # logs end of DRR generation and the time taken
         frontal_drr = drr_generator.frontal_view
         lateral_drr = drr_generator.lateral_view
+        if self.logger:
+            self.logger.debug(
+                f"DRR generation took {time.time() - start_time:.2f} seconds"
+            )
+        del drr_generator  # free up memory from DRR generator
 
         # creates lists containing frontal and lateral views of the x-rays
         singleview_frontals = [
@@ -307,36 +320,58 @@ class PatientDataStorer:
         # get the raw CT array (preserves original pixel values)
         # and convert it to Hounsfield Units (HU) without applying
         # the full `process()` pipeline (which would rescale/normalize)
+        # logs time taken to get raw array
+        start_time = time.time()
         ct_raw = ct_scan.get_raw_array()
-        #print("[Step 1 – Raw array] min:", ct_raw.min(), "max:", ct_raw.max())
+        if self.logger:
+            self.logger.debug(
+                f"Getting raw CT array took {time.time() - start_time:.2f} seconds"
+            )
+        # logs time taken to get raw array
+        # print("[Step 1 – Raw array] min:", ct_raw.min(), "max:", ct_raw.max())
 
         # Step 2 – Initialise processor (no processing yet)
-        ct_processor = CTProcessor(ct_raw, ct_scan.dicom)
-        #print("[Step 2 – Processor init] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+        # supply the entire scan; the processor will grab the
+        # representative slice internally
+        ct_processor = CTProcessor(ct_raw, ct_scan)
+        # print("[Step 2 – Processor init] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
         # Step 3 – Convert raw values to Hounsfield Units (HU)
         ct_processor._raw_array_to_hu()
-        #print("[Step 3 – Raw→HU] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+        # print("[Step 3 – Raw→HU] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
-        # Step 4 – Apply windowing (if available)
-        #try:
-        #    ct_processor._apply_windowing()
-        #    print("[Step 4 – Windowing] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
-        #except Exception:
-        #    print("[Step 4 – Windowing] no windowing info, array unchanged")
-        #    pass
+        # Step 4 - segment body
+        # logs time taken to segment step
+        start_time = time.time()
+        ct_processor._segment_body()
+        if self.logger:
+            self.logger.debug(
+                f"Segmenting body took {time.time() - start_time:.2f} seconds"
+            )
+        # finishes logging time taken to segment step
 
-        # Step 5 – Transpose axes
+        # Step 5 – Transform to LIDC format (clipping and shifting)
+        # logs time taken to transform to LIDC format
+        start_time = time.time()
+        ct_processor._transform_to_lidc_format()
+        if self.logger:
+            self.logger.debug(
+                f"Transforming to LIDC format took {time.time() - start_time:.2f} seconds"
+            )
+        # finishes logging time taken to transform to LIDC format
+        # print("[Step 4 – LIDC transformation] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+
+        # Step 6 – Transpose axes
         ct_processor._transpose()
-        #print("[Step 5 – Transpose] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+        # print("[Step 5 – Transpose] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
-        # Step 6 – Resize (kept same size here)
+        # Step 7 – Resize (kept same size here)
         ct_processor._resize()
-        #print("[Step 6 – Resize] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
+        # print("[Step 6 – Resize] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
         # Final volume ready for downstream use
         ct_volume = ct_processor.array
-        #print("[Final] CT volume shape:", ct_volume.shape, "min:", ct_volume.min(), "max:", ct_volume.max())
+        # print("[Final] CT volume shape:", ct_volume.shape, "min:", ct_volume.min(), "max:", ct_volume.max())
 
         metadata = {}
         dcm = ct_scan.dicom.dicom
@@ -350,6 +385,8 @@ class PatientDataStorer:
         metadata["acquisition_date"] = str(dcm.get("AcquisitionDate"))
         metadata["spacing"] = ct_scan.spacing
 
+        # logs time taken to store data in h5 file
+        start_time = time.time()
         h5f.store_array("ct", ct_volume)
         h5f.store_array("xray1", frontal_drr)
         h5f.store_array("xray2", lateral_drr)
@@ -360,6 +397,11 @@ class PatientDataStorer:
             h5f.store_array("real_xray2", lateral_xray)
 
         h5f.close()
+        if self.logger:
+            self.logger.debug(
+                f"Storing data to h5 file took {time.time() - start_time:.2f} seconds"
+            )
+        # finishes logging time taken to store data in h5 file
 
     def retrieve_from_file(self):
         h5f = HDF5FileHandler(self.patient_id, mode="read")

@@ -4,13 +4,16 @@ import numpy as np
 from abc import ABC
 import cv2
 import torch
+import nibabel as nib
+from totalsegmentator.python_api import totalsegmentator
 
 RESIZE_SIZE = 256
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from lib.dicom import BaseDicomFile, CTSlice, XRayView
+    # avoid import-time circular dependency; only imported for type checking
+    from lib.dicom import BaseDicomFile, CTSlice, XRayView, CTScanDirectory
 
 
 class BaseProcessor(ABC):
@@ -304,25 +307,51 @@ class CTProcessor(BaseProcessor):
     def __init__(
         self,
         array: np.ndarray,
-        dicom: CTSlice,
+        scan: "CTScanDirectory",
     ) -> None:
-        super().__init__(array=array, dicom=dicom)
-        self.dicom: CTSlice = self.dicom
+        """Initialize a CT processor from a full scan directory.
+
+        The previous API accepted a single ``CTSlice`` instance;
+        the new contract expects the caller to provide the entire
+        :class:`~lib.dicom.CTScanDirectory`.  For backwards
+        compatibility we transparently keep ``self.dicom`` pointing to
+        the middle slice of the scan (``scan.dicom``), but the full
+        directory is stored in ``self.scan`` so that higher‑level code
+        can access spacing, orientation, etc. across the volume.
+        """
+        # ``BaseProcessor`` still wants a ``dicom`` argument, so pass
+        # the representative slice from the scan.
+        super().__init__(array=array, dicom=scan.dicom)
+
+        # store both objects as requested by the new design
+        self.scan: "CTScanDirectory" = scan
+        # keep the familiar attribute for existing methods
+        self.dicom: CTSlice = scan.dicom
+
+        self.pixel_spacing = self.dicom.pixel_spacing
+        self.spacing = self.scan.spacing
 
     @property
     def image_position_patient(self):
+        # image_position_patient is a property of the slice; we still
+        # forward to ``self.dicom`` for convenience
         return self.dicom.image_position_patient
 
-    @property
-    def pixel_spacing(self):
-        return self.dicom.pixel_spacing
-
     def process(self) -> np.ndarray:
-        self._set_min_to_max()
+        # self._set_min_to_max()
         self._raw_array_to_hu()
+        self._segment_body()
+
+        # 2. geographic standardization: make spacing isotropic
+        self._resample()
+
+        # 3. dimensionality -- resize/crop to fixed input size
+        self._crop()
+
+        # shifts everything by +1024
         self._rescale()
-        self._set_max_to_min()
-        self._normalize()
+        # self._set_max_to_min()
+        #self._normalize()
         # self._resize()
 
         return self.array
@@ -389,6 +418,62 @@ class CTProcessor(BaseProcessor):
         # Perform in-place operations to reduce memory overhead
         np.multiply(self.array, self.slope, out=self.array)  # Multiplication in-place
         np.add(self.array, self.intercept, out=self.array)  # Addition in-place
+
+    def _segment_body(self):
+        """
+        Run TotalSegmentator to generate a body mask and apply it to
+        ``self.array``.
+
+        The segmentation is executed on the current volume (which should be
+        in HU units after ``_raw_array_to_hu``).  Voxels outside of the body
+        are set to a constant minimum HU value (typically -1024) so that
+        subsequent rescaling/normalization treats them as air/background.
+
+        This helper mirrors the steps demonstrated in the notebooks
+        (see ``total_seg.ipynb``) and is invoked from :meth:`process`.
+        """
+        # import lazily to avoid pulling heavy dependencies unless used
+
+
+
+        # create a temporary NIfTI image with identity affine; spacing
+        # information is not required for the body task.
+        # affine = np.eye(4)
+        affine = self.scan.affine
+        nifti_img = nib.Nifti1Image(self.array, affine)
+
+        # perform segmentation
+        mask_img = totalsegmentator(nifti_img, task="body", ml=True, quiet=True, device="gpu")
+        mask = mask_img.get_fdata().astype(bool)
+
+        # apply mask: outside body -> minimum HU (air)
+        min_hu = -1024
+        self.array = np.where(mask, self.array, min_hu)
+
+    def _transform_to_lidc_format(self):
+        """
+        Transforms the CT volume to the LIDC format:
+        1. Clips lower bound at -1024 (HU) to handle air-background variance.
+        2. Applies an offset of +1024 to shift Air to ~0.
+        3. Clips the final range to [0, 2500].
+        """
+        # Ensure we are in float32 for calculations if not already
+        #if not np.issubdtype(self.array.dtype, np.floating):
+        #    self.array = self.array.astype(np.float32)
+
+        # 1. Start from HU units (assumed already converted)
+        # 2. Clip lower bound at -1024 to handle scanners with -2048 background
+        # and upper bound to handle extreme metal artifacts before offset.
+        # We use 20000 as a safe upper bound for initial clipping.
+        # Perform in-place operations to reduce memory overhead
+        # np.clip(self.array, -1024, 20000, out=self.array)
+
+        # 3. Apply Offset
+        # self.array += 1024
+
+        # 4. Final Clip for [0, 2500] range
+        np.clip(self.array, -1024, 5500, out=self.array)
+        #self.array += 1024
 
     def _set_negative_values_to_zero(self):
         """Fixes the round crop value so it stays within HU range."""
@@ -460,6 +545,9 @@ class CTProcessor(BaseProcessor):
         resize using one of the axis. If there are less than 100 slices, add
         padding.
         """
+        # legacy helper left in place for backwards compatibility; new
+        # pipelines should use `_crop` which internally handles both
+        # upsampling and center‑cropping.
         arr = torch.Tensor(self.array)
         arr = arr.unsqueeze(0).unsqueeze(0)
         arr = torch.nn.functional.interpolate(
@@ -503,3 +591,91 @@ class CTProcessor(BaseProcessor):
         arr = self.array
         self.array = np.transpose(arr, axes=(2, 0, 1))
         return
+
+    def _resample(self, target_spacing: float = 1.0) -> None:
+        """
+        Resample the current volume so that voxel spacing becomes isotropic
+        (default 1 mm).
+
+        The method computes zoom factors using the original spacing stored
+        in ``self.scan`` and applies a trilinear interpolation via
+        ``torch.nn.functional.interpolate`` (which is significantly faster
+        than ``scipy.ndimage.zoom`` for 3D volumes). After resampling, the
+        volume is written back to ``self.array`` and the ``spacing``
+        attribute is updated so that later code is aware of the new spacing.
+        """
+        original_spacing = np.array(list(self.scan.spacing), dtype=float)
+        if original_spacing.size != 3:
+            raise ValueError("expected 3 spacing values for CT volume")
+
+        # compute zoom that converts spacing -> target_spacing.
+        zoom_factors = original_spacing / float(target_spacing)
+        if not np.all(zoom_factors > 0):
+            raise ValueError("computed non-positive zoom factor")
+
+        # Compute target size exactly like ndimage.zoom does
+        target_size = [
+            int(np.round(s * z)) for s, z in zip(self.array.shape, zoom_factors)
+        ]
+
+        # perform the interpolation
+        # torch expects (N, C, D, H, W) for 3D interpolation
+        tensor = (
+            torch.from_numpy(np.ascontiguousarray(self.array)).unsqueeze(0).unsqueeze(0)
+        )
+
+        # align_corners=True matches the behavior of scipy.ndimage.zoom
+        resampled_tensor = torch.nn.functional.interpolate(
+            tensor, size=target_size, mode="trilinear", align_corners=True
+        )
+
+        self.array = resampled_tensor.squeeze().numpy()
+
+        # update stored spacing information for downstream consumers
+        self.spacing = np.array([target_spacing, target_spacing, target_spacing])
+
+    def _crop(self, target_size: int = 320) -> None:
+        """
+        Adjust the volume to satisfy dimensionality requirements:
+
+        * Case A (all dimensions \>= ``target_size``): centre‑crop to
+          ``target_size`` in every axis.
+        * Case B (any dimension < ``target_size``): first upsample the
+          volume until its smallest axis reaches **256** voxels, then
+          centre‑crop the remaining dimensions that exceed
+          ``target_size``.  The intent is to avoid zero‑padding while
+          limiting unnatural up‑sampling.
+
+        The final shape will therefore either be ``target_size`` in every
+        axis or, in the second case, contain one axis between 256 and
+        ``target_size`` with the others clipped to ``target_size``.
+        """
+        # lazy import because SciPy may not be present in minimal installs
+        from scipy import ndimage
+
+        arr = self.array
+        shape = np.array(arr.shape, dtype=int)
+
+        if np.all(shape >= target_size):
+            # simple centre crop
+            start = (shape - target_size) // 2
+            slices = tuple(slice(start[i], start[i] + target_size) for i in range(3))
+            self.array = arr[slices]
+            return
+
+        # Case B: upsample so that the smallest axis is at least 256
+        min_dim = shape.min()
+        if min_dim < 256:
+            scale = 256.0 / float(min_dim)
+            arr = ndimage.zoom(arr, zoom=scale, order=3)
+            shape = np.array(arr.shape, dtype=int)
+
+        # centre crop any dimension that exceeds the target size
+        slices = []
+        for size in shape:
+            if size > target_size:
+                start = (size - target_size) // 2
+                slices.append(slice(start, start + target_size))
+            else:
+                slices.append(slice(0, size))
+        self.array = arr[tuple(slices)]

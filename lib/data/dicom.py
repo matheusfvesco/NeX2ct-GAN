@@ -69,6 +69,9 @@ class DicomDataset:
                 dcm_paths = list(Path(dirpath).glob("*.dcm"))
                 if not dcm_paths:
                     continue
+                #self.logger.warning(
+                #    f"Begiinning processing directory '{dirpath}' with {len(dcm_paths)} DICOM files"
+                #)
                 try:
                     directory = DicomDirectory(dirpath)
                     patient_id: str = directory.dataset_agnostic_patient_id
@@ -80,6 +83,9 @@ class DicomDataset:
                     if directory.is_singleview:
                         self[patient_id]["xrays"].append(directory)
                 except Exception as e:
+                    self.logger.warning(
+                        f"Error processing directory '{dirpath}' with {len(dcm_paths)} DICOM files: {e}"
+                    )
                     continue
             single_dataset_bar.close()
         self.logger.info("Success!\n\n")
