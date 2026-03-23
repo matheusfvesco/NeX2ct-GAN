@@ -349,7 +349,8 @@ class CTProcessor(BaseProcessor):
         self._crop()
 
         # shifts everything by +1024
-        self._rescale()
+        #self._rescale()
+        self._transform_to_lidc_format()
         # self._set_max_to_min()
         #self._normalize()
         # self._resize()
@@ -473,7 +474,7 @@ class CTProcessor(BaseProcessor):
 
         # 4. Final Clip for [0, 2500] range
         np.clip(self.array, -1024, 5500, out=self.array)
-        #self.array += 1024
+        self.array += 1024
 
     def _set_negative_values_to_zero(self):
         """Fixes the round crop value so it stays within HU range."""

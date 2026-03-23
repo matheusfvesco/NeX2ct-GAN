@@ -239,6 +239,13 @@ class PatientDataStorer:
         multiview_dirs: list[MultiviewXRayDirectory] = self.data_dictionary["multiview"]
 
         ct_scan = ct_scans[0]
+        # preloads processed array
+        start_time = time.time()
+        ct_scan.get_array()
+        if self.logger:
+            self.logger.debug(
+                f"Preloading processed CT array took {time.time() - start_time:.2f} seconds"
+            )
         # logs starting to generate DRRs
         start_time = time.time()
         drr_generator = ct_scan.drr_generator
@@ -249,7 +256,7 @@ class PatientDataStorer:
             self.logger.debug(
                 f"DRR generation took {time.time() - start_time:.2f} seconds"
             )
-        del drr_generator  # free up memory from DRR generator
+        #del drr_generator  # free up memory from DRR generator
 
         # creates lists containing frontal and lateral views of the x-rays
         singleview_frontals = [
@@ -322,7 +329,7 @@ class PatientDataStorer:
         # the full `process()` pipeline (which would rescale/normalize)
         # logs time taken to get raw array
         start_time = time.time()
-        ct_raw = ct_scan.get_raw_array()
+        ct_raw = ct_scan.get_array()
         if self.logger:
             self.logger.debug(
                 f"Getting raw CT array took {time.time() - start_time:.2f} seconds"
@@ -337,27 +344,27 @@ class PatientDataStorer:
         # print("[Step 2 – Processor init] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
         # Step 3 – Convert raw values to Hounsfield Units (HU)
-        ct_processor._raw_array_to_hu()
+        #ct_processor._raw_array_to_hu()
         # print("[Step 3 – Raw→HU] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 
         # Step 4 - segment body
         # logs time taken to segment step
-        start_time = time.time()
-        ct_processor._segment_body()
-        if self.logger:
-            self.logger.debug(
-                f"Segmenting body took {time.time() - start_time:.2f} seconds"
-            )
+        #start_time = time.time()
+        #ct_processor._segment_body()
+        #if self.logger:
+        #    self.logger.debug(
+        #        f"Segmenting body took {time.time() - start_time:.2f} seconds"
+        #    )
         # finishes logging time taken to segment step
 
         # Step 5 – Transform to LIDC format (clipping and shifting)
         # logs time taken to transform to LIDC format
-        start_time = time.time()
-        ct_processor._transform_to_lidc_format()
-        if self.logger:
-            self.logger.debug(
-                f"Transforming to LIDC format took {time.time() - start_time:.2f} seconds"
-            )
+        #start_time = time.time()
+        #ct_processor._transform_to_lidc_format()
+        #if self.logger:
+        #    self.logger.debug(
+        #        f"Transforming to LIDC format took {time.time() - start_time:.2f} seconds"
+        #    )
         # finishes logging time taken to transform to LIDC format
         # print("[Step 4 – LIDC transformation] min:", ct_processor.array.min(), "max:", ct_processor.array.max())
 

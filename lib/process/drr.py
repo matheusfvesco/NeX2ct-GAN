@@ -33,10 +33,12 @@ class DRRGenerator:
 
         self.spacing = np.array(list(ctdirectory.spacing))
         if not custom_process_order:
-            #self.volume = ctdirectory.get_array()
-            processor = CTProcessor(array=ctdirectory.get_raw_array(**kwargs), scan=ctdirectory)
-            self.volume = processor.process()
-            self.spacing = processor.spacing
+            self.volume = ctdirectory.get_array()
+            processor = CTProcessor(array=self.volume, scan=ctdirectory)
+            processor._normalize()
+            self.volume = processor.array
+            target_spacing = 1.0
+            self.spacing = np.array([target_spacing, target_spacing, target_spacing])
         else:
             if not kwargs:  # if no kwargs provided, allows the use of cache
                 array = ctdirectory.get_raw_array(**kwargs)
