@@ -28,65 +28,65 @@ def find_ct_files(input_dir: Path) -> Iterable[Path]:
     return input_dir.rglob("ct_xray_data.h5")
 
 
-def process_file(in_path: Path, out_path: Path) -> None:
-    """Create a patched copy of the HDF5 file at out_path if both
-    `real_xray1` and `real_xray2` exist in the input file.
+def copy_h5(
+    fin: h5py.File, fout: h5py.File, replace_xrays: bool, in_path: Path, out_path: Path
+):
+    target_names = {"xray1", "xray2"}
+    for name in fin:
+        try:
+            if replace_xrays and name == "real_xray1":
+                logging.debug("Renaming real_xray1 -> xray1 in %s", out_path)
+                fin.copy("real_xray1", fout, name="xray1")
+            elif replace_xrays and name == "real_xray2":
+                logging.debug("Renaming real_xray2 -> xray2 in %s", out_path)
+                fin.copy("real_xray2", fout, name="xray2")
+            else:
+                if replace_xrays and name in target_names:
+                    logging.debug(
+                        "Skipping input name '%s' to avoid collision in %s",
+                        name,
+                        out_path,
+                    )
+                    continue
+                fin.copy(name, fout)
+        except Exception as exc:
+            logging.warning(
+                "Failed to copy '%s' from %s -> %s: %s", name, in_path, out_path, exc
+            )
 
-    If both keys are present the output file will contain `xray1` and `xray2`
-    datasets instead of `real_xray1` and `real_xray2`. Other top-level groups
-    and datasets are copied as-is.
+
+def process_file(
+    in_path: Path, out_path: Path, mixed_out_path: Path
+) -> tuple[bool, bool]:
+    """Create a patched copy of the HDF5 file at out_path if both
+    `real_xray1` and `real_xray2` exist in the input file. Also creates a mixed dataset copy.
     """
-    logging.debug("Processing '%s' -> '%s'", in_path, out_path)
+    logging.debug("Processing '%s'", in_path)
+
+    processed_pure = False
+    processed_mixed = False
 
     with h5py.File(in_path, "r") as fin:
         has_rx1 = "real_xray1" in fin
         has_rx2 = "real_xray2" in fin
+        replace_xrays = has_rx1 and has_rx2
 
-        if not (has_rx1 and has_rx2):
-            logging.info("Skipping '%s' (missing real_xray1/2)", in_path)
-            return
+        if replace_xrays:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            with h5py.File(out_path, "w") as fout:
+                copy_h5(fin, fout, True, in_path, out_path)
+            logging.info("Wrote patched pure file: %s", out_path)
+            processed_pure = True
+        else:
+            logging.info("Skipping pure patch for '%s' (missing real_xray1/2)", in_path)
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        mixed_out_path.parent.mkdir(parents=True, exist_ok=True)
+        with h5py.File(mixed_out_path, "w") as fout:
+            copy_h5(fin, fout, replace_xrays, in_path, mixed_out_path)
+        logging.info("Wrote patched mixed file: %s", mixed_out_path)
+        processed_mixed = True
 
-        # Create output file and copy top-level members, renaming the two
-        # xray datasets to the new names. We avoid copying any input item that
-        # would collide with the target names (xray1/xray2) because those are
-        # created from real_xray1/2. Copy operations are guarded so a failure
-        # on one member doesn't abort copying of others.
-        target_names = {"xray1", "xray2"}
-
-        with h5py.File(out_path, "w") as fout:
-            for name in fin:
-                try:
-                    if name == "real_xray1":
-                        logging.debug("Renaming real_xray1 -> xray1 in %s", out_path)
-                        fin.copy("real_xray1", fout, name="xray1")
-                    elif name == "real_xray2":
-                        logging.debug("Renaming real_xray2 -> xray2 in %s", out_path)
-                        fin.copy("real_xray2", fout, name="xray2")
-                    else:
-                        # If the input already contains xray1/xray2, skip them so
-                        # they don't overwrite the renamed datasets we just added.
-                        if name in target_names:
-                            logging.debug(
-                                "Skipping input name '%s' to avoid collision in %s",
-                                name,
-                                out_path,
-                            )
-                            continue
-
-                        # copy item with same name
-                        fin.copy(name, fout)
-                except Exception as exc:  # broad catch to keep processing other items
-                    logging.warning(
-                        "Failed to copy '%s' from %s -> %s: %s",
-                        name,
-                        in_path,
-                        out_path,
-                        exc,
-                    )
-
-        logging.info("Wrote patched file: %s", out_path)
+    return processed_pure, processed_mixed
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
 
     input_dir: Path = args.input_dir
     output_dir: Path = args.output_dir
+    mixed_output_dir: Path = output_dir.with_name(output_dir.name + "_mixed")
 
     if not input_dir.exists():
         logging.error("Input directory does not exist: %s", input_dir)
@@ -115,7 +116,8 @@ def main(argv: list[str] | None = None) -> int:
     found = list(find_ct_files(input_dir))
     logging.info("Found %d ct_xray_data.h5 files under %s", len(found), input_dir)
 
-    processed = 0
+    processed_pure_count = 0
+    processed_mixed_count = 0
     skipped = 0
 
     for in_file in found:
@@ -127,9 +129,14 @@ def main(argv: list[str] | None = None) -> int:
             rel = in_file.name
 
         out_file = output_dir.joinpath(rel)
+        mixed_out_file = mixed_output_dir.joinpath(rel)
 
         try:
-            process_file(in_file, out_file)
+            p_pure, p_mixed = process_file(in_file, out_file, mixed_out_file)
+            if p_pure:
+                processed_pure_count += 1
+            if p_mixed:
+                processed_mixed_count += 1
         except Exception as exc:
             logging.exception("Error processing '%s': %s", in_file, exc)
             skipped += 1
@@ -137,24 +144,18 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 if out_file.exists():
                     out_file.unlink()
+                if mixed_out_file.exists():
+                    mixed_out_file.unlink()
             except Exception:
                 pass
             continue
 
-        # check whether we wrote output and that it contains expected datasets
-        try:
-            with h5py.File(out_file, "r") as fout:
-                if "xray1" in fout and "xray2" in fout:
-                    processed += 1
-                else:
-                    logging.warning(
-                        "Output file %s does not contain xray1/xray2", out_file
-                    )
-                    skipped += 1
-        except Exception:
-            skipped += 1
-
-    logging.info("Completed. Processed: %d, Skipped: %d", processed, skipped)
+    logging.info(
+        "Completed. Pure instances saved: %d, Mixed instances saved: %d, Skipped: %d",
+        processed_pure_count,
+        processed_mixed_count,
+        skipped,
+    )
     return 0
 
 
