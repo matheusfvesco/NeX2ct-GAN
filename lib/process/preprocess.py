@@ -204,10 +204,12 @@ class XRayProcessor(BaseProcessor):
 
     def _normalize(self):
         self.array = self.array.astype(np.float64)
-        self.array = self.array - np.min(self.array)
-        self.array = (1 / (np.max(self.array) - np.min(self.array))) * (
-            self.array - np.min(self.array)
-        )
+        min_val = self.array.min()
+        max_val = self.array.max()
+        if max_val > min_val:
+            self.array = (self.array - min_val) / (max_val - min_val) * 255.0
+        else:
+            self.array = np.zeros_like(self.array)
 
     def _apply_window_to_array(self):
         """
