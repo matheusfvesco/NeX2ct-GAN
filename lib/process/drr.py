@@ -214,6 +214,6 @@ class DRRGenerator:
         img = img.squeeze().cpu().numpy()
         img = cv2.resize(img, dsize=(RESIZE_SIZE, RESIZE_SIZE))
         img = cv2.normalize(
-            img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U
+            img, None, alpha=0, beta=255, norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_32F
         )
         return img

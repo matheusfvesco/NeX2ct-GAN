@@ -150,11 +150,8 @@ class XRayProcessor(BaseProcessor):
             np.ndarray: The processed image array.
         """
         self._apply_photometric()
-        # self._apply_window_to_array()
-        # self._set_max_to_min()
-        self._normalize()
-
         self._resize()
+        self._normalize()
 
         return self.array
 
@@ -203,13 +200,14 @@ class XRayProcessor(BaseProcessor):
             raise ValueError(f"Transform '{name}' not recognized.")
 
     def _normalize(self):
-        self.array = self.array.astype(np.float64)
-        min_val = self.array.min()
-        max_val = self.array.max()
-        if max_val > min_val:
-            self.array = (self.array - min_val) / (max_val - min_val) * 255.0
-        else:
-            self.array = np.zeros_like(self.array)
+        self.array = cv2.normalize(
+            self.array,
+            None,
+            alpha=0,
+            beta=255,
+            norm_type=cv2.NORM_MINMAX,
+            dtype=cv2.CV_32F,
+        )
 
     def _apply_window_to_array(self):
         """
