@@ -12,6 +12,10 @@ from lib.logging import setup_logger
 import os
 import csv
 import json
+from lib.data.cohort import Cohort
+from lib.data.audit import DicomAudit
+from lib.data.inventory import read_authorized_index, record_directory_result
+from lib.utils.dicom import XRayJsonClassifier
 
 
 class DicomDataset:
@@ -24,11 +28,16 @@ class DicomDataset:
             "LIDC-IDRI",
         ],
         logger=None,
+        cohort: Cohort | None = None,
+        audit: DicomAudit | None = None,
     ) -> None:
         self.root_dirpath = Path(root_dir)
         self.accepted_datasets = accepted_datasets
         self.dataset = None
         self.logger = logger if logger is not None else setup_logger("preprocess")
+        self.cohort = cohort
+        self.audit = audit if audit is not None else DicomAudit()
+        self.patient_selection_annotations = {}
 
     def __iter__(self):
         return iter(self.dataset.keys())
@@ -55,26 +64,34 @@ class DicomDataset:
         """
         self.logger.info("Creating dataset dictionary...")
         self.dataset = defaultdict(self._create_default_patient_dict)
+        if self.cohort is not None:
+            self._load_authorized_series()
+            return
 
-        datasets_bar = tqdm(self.accepted_datasets)
+        datasets_bar = tqdm(sorted(self.accepted_datasets))
         for dataset_name in datasets_bar:
             datasets_bar.set_description(dataset_name)
             dataset_path = self.root_dirpath / dataset_name
             self.logger.debug(f"including data inside '{dataset_path}'...")
-            single_dataset_bar = tqdm(list(os.walk(dataset_path)))
-            for dirpath, dirnames, filenames in single_dataset_bar:
-                single_dataset_bar.set_description(f"{dataset_name}")
-                if not filenames:
-                    continue
-                dcm_paths = list(Path(dirpath).glob("*.dcm"))
+            if not dataset_path.exists():
+                self.logger.warning("Dataset path does not exist: '%s'", dataset_path)
+                continue
+            directories = sorted((Path(dirpath), filenames) for dirpath, _, filenames in os.walk(dataset_path))
+            single_dataset_bar = tqdm(directories)
+            for directory_path, filenames in single_dataset_bar:
+                dirpath = str(directory_path)
+                single_dataset_bar.set_description(dataset_name)
+                dcm_paths = sorted(
+                    path for path in directory_path.iterdir()
+                    if path.is_file() and path.suffix.lower() in {".dcm", ".dicom"}
+                )
                 if not dcm_paths:
                     continue
-                #self.logger.warning(
-                #    f"Begiinning processing directory '{dirpath}' with {len(dcm_paths)} DICOM files"
-                #)
+                patient_id, file_rows = None, []
                 try:
                     directory = DicomDirectory(dirpath)
-                    patient_id: str = directory.dataset_agnostic_patient_id
+                    patient_id = patient_id if self.cohort is not None else directory.dataset_agnostic_patient_id
+                    record_directory_result(self.audit, file_rows, dirpath, patient_id, directory=directory)
                     if directory.is_multiview:
                         self[patient_id]["multiview"].append(directory)
                     if directory.is_ct:
@@ -86,12 +103,95 @@ class DicomDataset:
                     self.logger.warning(
                         f"Error processing directory '{dirpath}' with {len(dcm_paths)} DICOM files: {e}"
                     )
+                    record_directory_result(self.audit, file_rows, dirpath, patient_id, error=e)
                     continue
             single_dataset_bar.close()
         self.logger.info("Success!\n\n")
         datasets_bar.close()
 
-    def filter_dataset(self):
+    def _load_authorized_series(self):
+        """Filter using the collection index before opening candidate DICOMs."""
+        for name in sorted(self.accepted_datasets):
+            index_root = self.root_dirpath / name
+            for series in read_authorized_index(index_root, self.cohort,
+                                                self.patient_selection_annotations, self.audit):
+                paths = series["paths"]
+                series_rows = series["file_rows"]
+                metadata = series["metadata"]
+                patient_id = metadata["patient_id"]
+                if not paths:
+                    self.audit.add_series(
+                        **metadata, file_paths=[], eligibility_status="ineligible",
+                        reason="indexed_series_contains_no_dicom_paths",
+                    )
+                    continue
+                if metadata["modality"] != "CT" and not any(
+                    split.startswith("real_") for split in metadata["memberships"]
+                ):
+                    for row in series_rows:
+                        row.update(eligibility_status="not_applicable", selection_status="skipped",
+                                   processing_status="skipped", eligibility_reason="patient_not_in_real_cohort")
+                    self.audit.add_series(
+                        **metadata, file_paths=[row["path"] for row in series_rows],
+                        eligibility_status="not_applicable", reason="patient_not_in_real_cohort",
+                    )
+                    continue
+                series_file_rows = series_rows
+                if metadata["modality"] != "CT":
+                    classifier = XRayJsonClassifier()
+                    annotated_paths = []
+                    for path in paths:
+                        try:
+                            if classifier.classify(path) in {"frontal", "lateral"}:
+                                annotated_paths.append(path)
+                        except (FileNotFoundError, KeyError, ValueError):
+                            continue
+                    if annotated_paths:
+                        selected_paths = set(annotated_paths)
+                        series_file_rows = [row for row in series_rows if Path(row["path"]) in selected_paths]
+                        for row in series_rows:
+                            if Path(row["path"]) not in selected_paths:
+                                row.update(eligibility_status="not_evaluated", selection_status="skipped",
+                                           selection_reason="view_not_in_path_annotation_json",
+                                           processing_status="skipped")
+                        paths = annotated_paths
+                    else:
+                        # Keep the historical ViewPosition fallback bounded to one
+                        # representative path, rather than opening every unlabelled image.
+                        representative = paths[len(paths) // 2]
+                        series_file_rows = [row for row in series_rows if Path(row["path"]) == representative]
+                        for row in series_rows:
+                            if Path(row["path"]) != representative:
+                                row.update(eligibility_status="not_evaluated", selection_status="skipped",
+                                           selection_reason="unlabelled_series_representative_only",
+                                           processing_status="skipped")
+                        paths = [representative]
+                try:
+                    directory = DicomDirectory(paths[0].parent, dicom_paths=paths)
+                    actual_id, id_status = self.cohort.resolve_patient_id(directory.dataset_agnostic_patient_id)
+                    if id_status != "matched" or actual_id != patient_id:
+                        raise ValueError(f"Representative path ID {actual_id!r} does not match indexed Subject ID {patient_id!r}")
+                    representative = directory.dicom.dicom
+                    if str(directory.modality).upper() != metadata["modality"]:
+                        raise ValueError(f"Representative modality differs from collection index for {patient_id}")
+                    for field, key in (("StudyInstanceUID", "study_instance_uid"),
+                                       ("SeriesInstanceUID", "series_instance_uid")):
+                        expected_uid = metadata.get(key)
+                        if expected_uid and str(representative.get(field)) != expected_uid:
+                            raise ValueError(f"Representative {field} differs from collection index for {patient_id}")
+                    record_directory_result(self.audit, series_file_rows, paths[0].parent, patient_id, directory=directory)
+                    if directory.is_ct:
+                        if directory.is_valid_axial_scan:
+                            self.dataset[patient_id]["cts"].append(directory)
+                    elif directory.is_multiview:
+                        self.dataset[patient_id]["multiview"].append(directory)
+                    else:
+                        self.dataset[patient_id]["xrays"].append(directory)
+                except Exception as exc:
+                    self.logger.warning("Error classifying series for '%s': %s", patient_id, exc)
+                    record_directory_result(self.audit, series_file_rows, paths[0].parent, patient_id, error=exc)
+
+    def filter_dataset(self, allowed_patient_ids=None):
         """
         Sorts the datasets based on their number of slices and removes invalid CTs
         """
@@ -99,8 +199,12 @@ class DicomDataset:
             raise ValueError("The dataset haven't been loaded yet")
         self.logger.info("Filtering invalid CTs and sorting by the amount of slices...")
 
-        with open("data/patient-selection-annotation.json") as f:
-            selection_annotations: dict = json.load(f)
+        if allowed_patient_ids is None:
+            if self.cohort is None:
+                raise ValueError("filter_dataset requires a split-derived allowlist or Cohort")
+            allowed_patient_ids = set(self.cohort.all_ids)
+        else:
+            allowed_patient_ids = set(allowed_patient_ids)
         dataset_bar = tqdm(sorted(self.keys()))
         for patient in dataset_bar:
             dataset_bar.set_description(patient)
@@ -109,10 +213,7 @@ class DicomDataset:
                 or self[patient] == self._create_default_patient_dict()
             ):
                 raise ValueError(f"The dataset {patient} is empty")
-            if patient not in selection_annotations.keys():
-                del self[patient]
-                continue
-            if selection_annotations[patient] != "selected":
+            if patient not in allowed_patient_ids:
                 del self[patient]
                 continue
             ct_scans: list[CTScanDirectory] = self[patient]["cts"]

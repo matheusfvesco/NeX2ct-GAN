@@ -2,10 +2,16 @@ from lib.datasets import RealCT, SyntheticCT
 import pytest
 from lib.transforms import Normalize
 
-@pytest.mark.parametrize("set",["splits/test_real.txt", "splits/train_real.txt"])
-def test_real_dataset(set):
+@pytest.mark.parametrize(
+    ("data_root", "set"),
+    [
+        ("output/preprocess/GAN-dataset-complete/real/real_test", "splits/real_test.txt"),
+        ("output/preprocess/GAN-dataset-complete/real/real_train", "splits/real_train.txt"),
+    ],
+)
+def test_real_dataset(data_root, set):
     dataset = RealCT(
-        data_root="preprocess/GAN-dataset",
+        data_root=data_root,
         set_file=set,
         transforms=Normalize(),
         ct_transforms=Normalize()
@@ -33,10 +39,16 @@ def test_real_dataset(set):
         assert xr2.max() == 1.0
         assert xr2.min() == 0.0
 
-@pytest.mark.parametrize("set",["splits/test_synthetic.txt", "splits/train_synthetic.txt"])
-def test_synthetic_dataset(set):
+@pytest.mark.parametrize(
+    ("data_root", "set"),
+    [
+        ("output/preprocess/GAN-dataset-complete/synthetic/synthetic_test", "splits/synthetic_test.txt"),
+        ("output/preprocess/GAN-dataset-complete/synthetic/synthetic_train", "splits/synthetic_train.txt"),
+    ],
+)
+def test_synthetic_dataset(data_root, set):
     dataset = SyntheticCT(
-        data_root="preprocess/GAN-dataset",
+        data_root=data_root,
         set_file=set,
         transforms=Normalize(),
         ct_transforms=Normalize()

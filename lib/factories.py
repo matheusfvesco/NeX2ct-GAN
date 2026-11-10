@@ -38,13 +38,13 @@ def CTFactory(dataset_type, data_root, set_root, transforms: None, ct_transforms
     if dataset_type == "real":
         train = RealCT(
             data_root=data_root,
-            set_file=set_root / "train_real.txt",
+            set_file=set_root / "real_train.txt",
             transforms=transforms,
             ct_transforms=ct_transforms,
         )
         test = RealCT(
             data_root=data_root,
-            set_file=set_root / "test_real.txt",
+            set_file=set_root / "real_test.txt",
             transforms=transforms,
             ct_transforms=ct_transforms,
         )
@@ -53,13 +53,27 @@ def CTFactory(dataset_type, data_root, set_root, transforms: None, ct_transforms
     if dataset_type == "synthetic":
         train = SyntheticCT(
             data_root=data_root,
-            set_file=set_root / "train_synthetic.txt",
+            set_file=set_root / "synthetic_train.txt",
             transforms=transforms,
             ct_transforms=ct_transforms,
         )
         test = SyntheticCT(
             data_root=data_root,
-            set_file=set_root / "test_synthetic.txt",
+            set_file=set_root / "synthetic_test.txt",
+            transforms=transforms,
+            ct_transforms=ct_transforms,
+        )
+        return train, test
+    if dataset_type == "mixed":
+        train = SyntheticCT(
+            data_root=data_root,
+            set_file=set_root / "mixed_train.txt",
+            transforms=transforms,
+            ct_transforms=ct_transforms,
+        )
+        test = SyntheticCT(
+            data_root=data_root,
+            set_file=set_root / "mixed_test.txt",
             transforms=transforms,
             ct_transforms=ct_transforms,
         )
@@ -69,13 +83,13 @@ def CTFactory(dataset_type, data_root, set_root, transforms: None, ct_transforms
         # useful when quickly testing the model
         train = SyntheticCT(
             data_root=data_root,
-            set_file=set_root / "test_synthetic.txt",
+            set_file=set_root / "synthetic_test.txt",
             transforms=transforms,
             ct_transforms=ct_transforms,
         )
         test = SyntheticCT(
             data_root=data_root,
-            set_file=set_root / "test_synthetic.txt",
+            set_file=set_root / "synthetic_test.txt",
             transforms=transforms,
             ct_transforms=ct_transforms,
         )

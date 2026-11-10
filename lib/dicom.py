@@ -14,7 +14,7 @@ import numpy as np
 # from scipy import ndimage # for applying masks
 # from skimage import morphology # for applying masks
 from functools import wraps
-from datetime import datetime
+from datetime import date, datetime
 from abc import ABC
 
 from lib.utils.viz import ArrayDisplayUtility
@@ -22,6 +22,12 @@ from lib.utils.utils import get_multival_by_index, Cache
 from lib.process.preprocess import CTProcessor, XRayProcessor
 from lib.process.drr import DRRGenerator
 from lib.utils.dicom import XRayJsonClassifier
+from lib.data.temporal import comparable_datetime, parse_acquisition_time
+
+
+def _parse_acquisition_datetime(dataset) -> dict:
+    """Compatibility wrapper; optional acquisition metadata never rejects an image."""
+    return parse_acquisition_time(dataset)
 
 
 def get_middle_dicom_filedataset(func):
@@ -152,7 +158,8 @@ class BaseDicomFile(ABC):
         # 'PatientID', 'WindowCenter', 'WindowWidth', 'RescaleSlope', 'RescaleIntercept',
         # 'PhotometricInterpretation', 'BitsAllocated', 'BitsStored', 'Rows', 'Columns',
         # '(0013, 1010)']
-        self.acquisition_datetime: datetime = self.get_acquisition_datetime()
+        self.acquisition_time: dict = self.get_acquisition_time()
+        self.acquisition_datetime: date | datetime | None = self.acquisition_time["parsed"]
         self.body_part_examined: str = self.get_body_part_examined()
         self.modality: str = self.get_modality()
         self.patient_id: str = self.get_patient_id()
@@ -186,23 +193,13 @@ class BaseDicomFile(ABC):
         return dicom.get("Modality")
 
     @get_dicom_filedataset
-    def get_acquisition_datetime(self, dicom: FileDataset) -> datetime:
-        acquisition_date = dicom.get("AcquisitionDate", "")
-        acquisition_time = dicom.get("AcquisitionTime", "")
-        acquisition_datetime_string = acquisition_date + acquisition_time
+    def get_acquisition_time(self, dicom: FileDataset) -> dict:
+        return _parse_acquisition_datetime(dicom)
 
-        if acquisition_date and acquisition_time:
-            if "." in acquisition_datetime_string:
-                format_string = "%Y%m%d%H%M%S.%f"
-            else:
-                format_string = "%Y%m%d%H%M%S"
-        else:
-            format_string = "%Y%m%d"
-
-        acquisition_datetime_parsed = datetime.strptime(
-            acquisition_datetime_string, format_string
-        )
-        return acquisition_datetime_parsed
+    @get_dicom_filedataset
+    def get_acquisition_datetime(self, dicom: FileDataset) -> date | datetime | None:
+        """Compatibility accessor; missing/invalid timestamps no longer reject a DICOM."""
+        return _parse_acquisition_datetime(dicom)["parsed"]
 
     @get_dicom_filedataset
     def get_body_part_examined(self, dicom: FileDataset) -> str:
@@ -236,7 +233,8 @@ class BaseDicomFile(ABC):
 
     @get_dicom_filedataset
     def get_dataset(self, dicom: FileDataset) -> str:
-        return dicom.get(("0013", "1010")).value
+        element = dicom.get((0x0013, 0x1010))
+        return element.value if element is not None else None
 
     @get_dicom_filedataset
     def _get_dicom(self, dicom: FileDataset):
@@ -325,9 +323,21 @@ class XRayView(BaseDicomFile):
         return window_center, window_width, photometric
 
     def get_view_type(self):
-        classifier = XRayJsonClassifier()
-        class_name = classifier.classify(self.dicom_path)
-        return class_name
+        try:
+            classifier = XRayJsonClassifier()
+            class_name = classifier.classify(self.dicom_path)
+            self.view_type_source = "manual_annotation"
+            return class_name
+        except (FileNotFoundError, KeyError, ValueError):
+            position = str(self.view_position or "").strip().upper()
+            if position in {"AP", "PA", "AP SUPINE", "PA ERECT"}:
+                self.view_type_source = "dicom_view_position"
+                return "frontal"
+            if position in {"LAT", "LATERAL", "LL", "RL"}:
+                self.view_type_source = "dicom_view_position"
+                return "lateral"
+            self.view_type_source = "unresolved"
+            return None
 
     @get_dicom_filedataset
     def _get_view_position(self, dicom: FileDataset) -> str:
@@ -461,7 +471,7 @@ class DicomFile:
 
 
 class BaseDicomDir(ABC):
-    def __init__(self, directory_path):
+    def __init__(self, directory_path, *, dicom_paths=None):
         super().__init__()
         accepted_extensions = [".dcm", ".dicom"]
         self.path_directory = Path(directory_path)
@@ -470,6 +480,8 @@ class BaseDicomDir(ABC):
             for extension in accepted_extensions
             for file_path in self.path_directory.glob(f"*{extension}")
         ]
+        if dicom_paths is not None:
+            self._paths_to_dicom_files = [Path(path) for path in dicom_paths]
 
         if not self.is_valid_path:
             raise ValueError(
@@ -494,7 +506,8 @@ class BaseDicomDir(ABC):
             raise ValueError("Dicom Directory doesn't belong to any dir type")
 
         self.dataset: str = self._get_dataset_name()
-        self.acquisition_datetime: datetime = self._get_acquisition_datetime()
+        self.acquisition_time: dict = self._get_acquisition_time()
+        self.acquisition_datetime: date | datetime | None = self._get_acquisition_datetime()
         self.dataset_agnostic_patient_id: str = self._get_dataset_agnostic_patient_id()
 
     @property
@@ -649,7 +662,11 @@ class BaseDicomDir(ABC):
         return sorted(self._get_all_dcms_unordered(), key=lambda dcm: dcm[key])
 
     @get_middle_dicom_filedataset
-    def _get_acquisition_datetime(self, dicom: BaseDicomFile) -> datetime:
+    def _get_acquisition_time(self, dicom: BaseDicomFile) -> dict:
+        return dicom.acquisition_time
+
+    @get_middle_dicom_filedataset
+    def _get_acquisition_datetime(self, dicom: BaseDicomFile) -> date | datetime | None:
         return dicom.acquisition_datetime
 
     @get_middle_dicom_filedataset
@@ -665,21 +682,29 @@ class BaseDicomDir(ABC):
         return dicom.dataset_agnostic_patient_id
 
     def get_most_recent(self):
-        dicoms = self.get_all_dicoms()
-        dicoms = sorted(dicoms, key=lambda x: x.acquisition_datetime)
-        return dicoms[-1]
+        return self._ordered_dated_dicoms()[-1]
 
     def get_oldest(self):
-        dicoms = self.get_all_dicoms()
-        dicoms = sorted(dicoms, key=lambda x: x.acquisition_datetime)
-        return dicoms[0]
+        return self._ordered_dated_dicoms()[0]
+
+    def _ordered_dated_dicoms(self):
+        dated = []
+        for dicom in self.get_all_dicoms():
+            record = dicom.acquisition_time
+            timestamp = comparable_datetime({"acquisition_datetime": record["parsed"], "time_status": record["status"]})
+            if timestamp is not None:
+                dated.append((timestamp, record["precision"], dicom))
+        profiles = {(precision, timestamp.utcoffset() is not None) for timestamp, precision, _ in dated}
+        if len(profiles) != 1:
+            raise ValueError("Cannot order acquisitions with missing or incomparable timestamps")
+        return [dicom for _, _, dicom in sorted(dated, key=lambda row: (row[0], str(row[2].dicom_path)))]
 
 
 class GenericDicomDirectory(BaseDicomDir):
     """Interface for the BaseDicomDir."""
 
-    def __init__(self, directory_path) -> None:
-        super().__init__(directory_path=directory_path)
+    def __init__(self, directory_path, *, dicom_paths=None) -> None:
+        super().__init__(directory_path=directory_path, dicom_paths=dicom_paths)
 
 
 class CTScanDirectory(BaseDicomDir):
@@ -1065,7 +1090,10 @@ class SingleViewXRayDirectory(BaseDicomDir):
         Returns:
             str: The view type of the DICOM image.
         """
-        return self[0].view_type
+        try:
+            return XRayJsonClassifier().classify(self._paths_to_dicom_files[0])
+        except (FileNotFoundError, KeyError, ValueError):
+            return None
 
     @property
     def image_type(self) -> str:
@@ -1116,14 +1144,15 @@ class MultiviewXRayDirectory(BaseDicomDir):
         where each key is a view_type ('frontal' or 'lateral') and its
         value is a list of the filepaths that refer to that view_type
         """
-        views: list[XRayView] = [view for view in self]
-
-        # maps each filepath to a view_type value
-        self.filenames_to_view_type = {
-            view.dicom_path: view.view_type
-            for view in views
-            if view.view_type and not (view.is_dx and view.is_derived)
-        }
+        classifier = XRayJsonClassifier()
+        self.filenames_to_view_type = {}
+        for path in self._paths_to_dicom_files:
+            try:
+                view_type = classifier.classify(path)
+            except (FileNotFoundError, KeyError, ValueError):
+                continue
+            if view_type:
+                self.filenames_to_view_type[path] = view_type
 
         # creates the inverse of the filenames_to_view_types dictionary,
         # so each key(view_type) returns a list of the filenames that
@@ -1162,9 +1191,9 @@ class DicomDirectoryFactory(
     """
 
     def __new__(
-        cls, directory_path: str
+        cls, directory_path: str, *, dicom_paths=None
     ) -> CTScanDirectory | SingleViewXRayDirectory | MultiviewXRayDirectory:
-        dicom_directory = GenericDicomDirectory(directory_path)
+        dicom_directory = GenericDicomDirectory(directory_path, dicom_paths=dicom_paths)
 
         if dicom_directory.is_ct:
             return CTScanDirectory(dicom_directory)
@@ -1182,8 +1211,8 @@ class DicomDirectory:
     """Interface for the DicomDirectoryFactory. Use this to create a specific
     DicomDirectory class from an unknown file."""
 
-    def __new__(cls, directory_path: str) -> DicomDirectoryFactory:
-        return DicomDirectoryFactory(directory_path)
+    def __new__(cls, directory_path: str, *, dicom_paths=None) -> DicomDirectoryFactory:
+        return DicomDirectoryFactory(directory_path, dicom_paths=dicom_paths)
 
 
 class XRayFactory:
