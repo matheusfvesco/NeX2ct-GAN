@@ -8,6 +8,13 @@ from typing import Any
 import pydicom
 
 
+def _selected_header(candidate, path):
+    header = getattr(candidate.get("_object"), "header", None)
+    if header is not None and str(getattr(header, "filename", "")) == path:
+        return header
+    return pydicom.dcmread(path, stop_before_pixels=True)
+
+
 def audit_selected_exams(selected: dict) -> dict:
     """Inspect only frozen instances, retaining per-file errors and frame evidence."""
     result = {}
@@ -20,7 +27,7 @@ def audit_selected_exams(selected: dict) -> dict:
             sampled = [instances[len(instances) // 2]]
         for instance in sampled:
             try:
-                header = pydicom.dcmread(instance["path"], stop_before_pixels=True)
+                header = _selected_header(candidate, instance["path"])
                 record = extract_respiratory_evidence(header, **instance)
             except Exception as exc:
                 record = {"status": "unreadable", "path": instance["path"],

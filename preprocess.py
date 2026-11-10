@@ -42,8 +42,14 @@ def _candidate(value, role: str, audit: DicomAudit, *, group_path: str | None = 
     paths = [Path(item) for item in getattr(value, "_paths_to_dicom_files", [path])]
     audit_by_path = audit.files_by_path
     instances = []
-    for instance_path in sorted(paths):
-        row = audit_by_path.get(str(instance_path.resolve()), {})
+    header = getattr(value, "header", None)
+    header_path = paths[len(paths) // 2] if role == "ct" else path
+    if header is not None and str(header_path) in audit_by_path:
+        audit_by_path[str(header_path)].update(
+            sop_instance_uid=header.get("SOPInstanceUID"), study_instance_uid=header.get("StudyInstanceUID"),
+            series_instance_uid=header.get("SeriesInstanceUID"), read_status="read_ok")
+    for instance_path in paths:
+        row = audit_by_path.get(str(instance_path), {})
         instances.append(
             {
                 "path": str(instance_path),
@@ -56,12 +62,7 @@ def _candidate(value, role: str, audit: DicomAudit, *, group_path: str | None = 
         group_time = group_time or {}
     else:
         group_time = getattr(value, "acquisition_time", {}) or {}
-    if hasattr(value, "is_valid_axial_scan") and not value.is_valid_axial_scan:
-        eligible = False
-    elif hasattr(value, "is_valid") and not value.is_valid:
-        eligible = False
-    else:
-        eligible = True
+    eligible = value.is_valid_axial_scan if role == "ct" else value.is_valid
     return {
         "role": role,
         "group_path": group_path or str(path),
@@ -95,17 +96,19 @@ def _patient_candidates(patient_data: dict, audit: DicomAudit) -> tuple[list, li
                 view_type = XRayJsonClassifier().classify(path)
             except (FileNotFoundError, KeyError, ValueError):
                 view_type = None
-            row = rows.get(str(Path(path).resolve()))
+            row = rows.get(str(path))
             try:
-                view = DicomFile(path)
+                view = directory.cache.get("views_by_path", {}).get(path)
+                if view is None:
+                    view = DicomFile(path)
                 view_type = view_type or view.view_type
                 if view.is_valid:
                     if view_type in views:
                         views[view_type].append(_candidate(
-                        view, view_type, audit,
-                        group_path=str(directory.path_directory), source_type=source,
-                        group_time=directory.acquisition_time,
-                    ))
+                            view, view_type, audit,
+                            group_path=str(directory.path_directory), source_type=source,
+                            group_time=directory.acquisition_time,
+                        ))
                     elif row is not None:
                         row.update(eligibility_status="ineligible", selection_status="skipped",
                                    eligibility_reason="view_classification_unresolved",
@@ -171,7 +174,10 @@ def prepare(args) -> dict:
     annotation_path = data_root / "patient-selection-annotation.json"
     with annotation_path.open(encoding="utf-8") as stream:
         annotations = json.load(stream)
-    XRayJsonClassifier(root_data=data_root)
+    if not isinstance(annotations, dict):
+        raise ValueError(f"Expected an ID-to-selection JSON object in {annotation_path}")
+    classifier = XRayJsonClassifier(root_data=data_root)
+    classifier.load_json(root_data=data_root)
     dataset = DicomDataset(data_root, accepted_datasets=datasets, logger=logger, cohort=cohort, audit=audit)
     dataset.patient_selection_annotations = annotations
     dataset.load()
@@ -248,7 +254,8 @@ def prepare(args) -> dict:
                 intervals=selection.get("intervals", {}),
             )
             if is_real:
-                entry["respiratory_evidence"] = audit_selected_exams(entry["selected"])
+                entry["respiratory_evidence"] = audit_selected_exams(
+                    {"ct": selected_ct, "frontal": selected_frontal, "lateral": selected_lateral})
             if selected_ct:
                 entry["status"] = selection.get("status", "selected")
             else:

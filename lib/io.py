@@ -274,6 +274,16 @@ class PatientDataStorer:
                 multiview for multiview in multiview_dirs
             ]
 
+    def _get_drr_views(self, ct_scan):
+        cached = ct_scan.cache.get("storer_drr_views") if self.selection_plan else None
+        if cached is not None:
+            return cached
+        generator = ct_scan.drr_generator
+        views = (generator.frontal_view, generator.lateral_view)
+        if self.selection_plan:
+            ct_scan.cache.add("storer_drr_views", views)
+        return views
+
     def store_to_file(self, dirpath: str | Path, compression: str | int = "lzf"):
         """
         compression:
@@ -295,15 +305,11 @@ class PatientDataStorer:
             )
         # logs starting to generate DRRs
         start_time = time.time()
-        drr_generator = ct_scan.drr_generator
-        # logs end of DRR generation and the time taken
-        frontal_drr = drr_generator.frontal_view
-        lateral_drr = drr_generator.lateral_view
+        frontal_drr, lateral_drr = self._get_drr_views(ct_scan)
         if self.logger:
             self.logger.debug(
                 f"DRR generation took {time.time() - start_time:.2f} seconds"
             )
-        #del drr_generator  # free up memory from DRR generator
 
         # creates lists containing frontal and lateral views of the x-rays
         singleview_frontals = [
@@ -329,19 +335,19 @@ class PatientDataStorer:
             if frontal_view is not None:
                 frontal_xray = frontal_view.get_array()
                 if age is None or age == "":
-                    age = frontal_view.dicom.get("PatientAge")
+                    age = frontal_view.header.get("PatientAge")
             if lateral_view is not None:
                 lateral_xray = lateral_view.get_array()
                 if age is None or age == "":
-                    age = lateral_view.dicom.get("PatientAge")
+                    age = lateral_view.header.get("PatientAge")
         elif singleview_frontals:
             frontal_xray = singleview_frontals[0].get_view().get_array()
             if age is None or age == "":
-                age = singleview_frontals[0].dicom.dicom.get("PatientAge")
+                age = singleview_frontals[0].header.get("PatientAge")
         if singleview_laterals and self.selection_plan is None:
             lateral_xray = singleview_laterals[0].get_view().get_array()
             if age is None or age == "":
-                age = singleview_laterals[0].dicom.dicom.get("PatientAge")
+                age = singleview_laterals[0].header.get("PatientAge")
         # decides to use either multiview dir or singleview dir for xrays
         # prefers using multiview if any of the directories have both views
         if multiview_dirs and self.selection_plan is None:
@@ -355,11 +361,11 @@ class PatientDataStorer:
                 if frontal_view is not None:
                     frontal_xray = frontal_view.get_array()
                     if age is None or age == "":
-                        age = frontal_view.dicom.get("PatientAge")
+                        age = frontal_view.header.get("PatientAge")
                 if lateral_view is not None:
                     lateral_xray = lateral_view.get_array()
                     if age is None or age == "":
-                        age = lateral_view.dicom.get("PatientAge")
+                        age = lateral_view.header.get("PatientAge")
             else:
                 # handle the case where there are no directories with both views
                 frontal_view = multiview_dirs[0].get_by_view_type(
@@ -371,11 +377,11 @@ class PatientDataStorer:
                 if frontal_view:
                     frontal_xray = frontal_view.get_array()
                     if age is None or age == "":
-                        age = frontal_view.dicom.get("PatientAge")
+                        age = frontal_view.header.get("PatientAge")
                 if lateral_view:
                     lateral_xray = lateral_view.get_array()
                     if age is None or age == "":
-                        age = lateral_view.dicom.get("PatientAge")
+                        age = lateral_view.header.get("PatientAge")
 
         output_path = dirpath / self.patient_id / "ct_xray_data.h5"
         temporary_path = output_path.with_name(f"{output_path.stem}.tmp-{os.getpid()}{output_path.suffix}")
@@ -437,7 +443,7 @@ class PatientDataStorer:
         # print("[Final] CT volume shape:", ct_volume.shape, "min:", ct_volume.min(), "max:", ct_volume.max())
 
         metadata = {}
-        dcm = ct_scan.dicom.dicom
+        dcm = ct_scan.header
         if age is None or age == "":
             age = dcm.get("PatientAge")
 
@@ -450,13 +456,13 @@ class PatientDataStorer:
         legacy_metadata = dict(metadata)
         metadata["schema_version"] = 1
         metadata["drr_temporal_status"] = "not_applicable_same_acquisition"
+        destination = str(self.selection_plan.get("destination", "")) if self.selection_plan else ""
         mixed_real_views = bool(
-            self.selection_plan
-            and str(self.selection_plan.get("destination", "")).startswith("mixed_")
+            destination.startswith("mixed_")
             and frontal_xray is not None
             and lateral_xray is not None
         )
-        metadata["training_xray_source"] = "real_xray" if mixed_real_views else "drr"
+        metadata["training_xray_source"] = "real_xray" if mixed_real_views or destination.startswith("real_") else "drr"
         if self.selection_plan:
             metadata["selection_policy"] = self.selection_plan.get("policy")
             metadata["selection_status"] = self.selection_plan.get("status")
@@ -495,6 +501,7 @@ class PatientDataStorer:
             "selection_fingerprint": plan.get("selection_fingerprint"),
             "processing_contract_version": plan.get("processing_contract_version"),
             "selected": plan.get("selected", {}),
+            "written_ct_instances": getattr(plan.get("ct"), "source_instances", []),
             "training_xray_source": metadata["training_xray_source"],
             "drr": {"derived_from_role": "ct", "temporal_interval_status": "not_applicable_same_acquisition"},
         }

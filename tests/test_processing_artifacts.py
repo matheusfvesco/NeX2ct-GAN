@@ -100,7 +100,8 @@ def test_prepare_can_select_synthetic_ct_without_any_pixel_or_hdf5_work(tmp_path
         write_summary = Mock()
         write_counts = Mock()
     monkeypatch.setattr(preprocess, "DicomDataset", Dataset)
-    monkeypatch.setattr(preprocess, "XRayJsonClassifier", lambda **kwargs: None)
+    monkeypatch.setattr(preprocess, "XRayJsonClassifier", lambda **kwargs: SimpleNamespace(
+        json_path=root / "xrays-view-annotation.json", load_json=Mock()))
     monkeypatch.setattr(preprocess, "setup_logger", lambda *args, **kwargs: Mock())
     def forbidden(*args, **kwargs):
         raise AssertionError("generation must not run during prepare")

@@ -15,14 +15,18 @@ class XRayJsonClassifier:
         self.json_path = Path(root_data) / "xrays-view-annotation.json"
         self.load_json()
 
-    def load_json(self):
+    def load_json(self, root_data=None):
+        json_path = Path(root_data) / "xrays-view-annotation.json" if root_data is not None else self.json_path
         try:
-            with open(self.json_path) as f:
-                self.annotations = json.load(f)
+            with open(json_path, encoding="utf-8") as f:
+                annotations = json.load(f)
         except FileNotFoundError:
-            raise FileNotFoundError(f"Annotation file not found at {self.json_path}")
+            raise FileNotFoundError(f"Annotation file not found at {json_path}")
         except json.JSONDecodeError:
-            raise ValueError(f"Error decoding JSON from {self.json_path}")
+            raise ValueError(f"Error decoding JSON from {json_path}")
+        if not isinstance(annotations, dict):
+            raise ValueError(f"Expected a path-to-view JSON object in {json_path}")
+        self.json_path, self.annotations = json_path, annotations
 
     def _preprocess_path(self, path: str | Path) -> str:
         path = Path(path)

@@ -1,115 +1,111 @@
-"""Cheap DICOM header inventory, independent of image processing classes."""
+"""Path-only inventory from the collection index; no DICOM files are opened here."""
 
 from collections import defaultdict
 from pathlib import Path
 import csv
 
 
-
 def read_authorized_index(index_root, cohort, annotations, audit):
     """Resolve split membership and paths from the collection index before DICOM I/O."""
-    index_path = Path(index_root) / "metadata.csv"
+    root = Path(index_root).resolve()
+    index_path = root / "metadata.csv"
     if not index_path.is_file():
         raise FileNotFoundError(f"Path-first inventory requires collection index {index_path}")
     grouped = defaultdict(lambda: {"metadata": None, "directories": []})
+    directory_owners = {}
     with index_path.open(encoding="utf-8-sig", newline="") as stream:
-        for row_number, record in enumerate(csv.DictReader(stream), 2):
+        reader = csv.DictReader(stream)
+        required = {"Subject ID", "File Location", "Modality", "Series UID", "Study UID"}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError(f"Collection index {index_path} lacks columns: {sorted(required - set(reader.fieldnames or []))}")
+        for row_number, record in enumerate(reader, 2):
             patient_id, status = cohort.resolve_patient_id(record.get("Subject ID"))
+            context = {
+                "patient_id": patient_id, "patient_id_raw": record.get("Subject ID"),
+                "memberships": list(cohort.memberships.get(patient_id, ())),
+                "study_instance_uid": str(record.get("Study UID") or "").strip() or None,
+                "series_instance_uid": str(record.get("Series UID") or "").strip() or None,
+                "modality": str(record.get("Modality") or "").strip().upper(),
+                "file_location": str(record.get("File Location") or "").strip(),
+                "file_count_indexed": record.get("Number of Images"),
+                "index_path": str(index_path), "index_row": row_number,
+            }
             if status != "matched":
-                audit.add_series(
-                    patient_id_raw=record.get("Subject ID"),
-                    series_instance_uid=record.get("Series UID") or None,
-                    study_instance_uid=record.get("Study UID") or None,
-                    modality=record.get("Modality"),
-                    file_location=record.get("File Location"),
-                    file_count_indexed=record.get("Number of Images"),
-                    index_path=str(index_path), index_row=row_number,
-                    eligibility_status="skipped", selection_status="skipped",
-                    reason="outside_all_splits" if status == "outside_all_splits" else status,
-                )
+                audit.add_series(**context, eligibility_status="skipped", selection_status="skipped", reason=status)
                 continue
             annotation = annotations.get(patient_id)
-            if annotation is not None and annotation != "selected":
-                audit.add_series(
-                    patient_id=patient_id, memberships=list(cohort.memberships[patient_id]),
-                    series_instance_uid=record.get("Series UID"),
-                    file_location=record.get("File Location"),
-                    eligibility_status="blocked", reason="patient_selection_annotation_conflict",
-                    index_path=str(index_path), index_row=row_number,
-                )
+            if patient_id in annotations and annotation != "selected":
+                audit.add_series(**context, eligibility_status="blocked", reason="patient_selection_annotation_conflict")
                 continue
-            modality = str(record.get("Modality", "")).strip().upper()
+            modality = context["modality"]
             if modality not in {"CT", "CR", "DX"}:
-                audit.add_series(
-                    patient_id=patient_id, memberships=list(cohort.memberships[patient_id]),
-                    series_instance_uid=record.get("Series UID") or None,
-                    study_instance_uid=record.get("Study UID") or None,
-                    modality=modality or None, file_location=record.get("File Location"),
-                    file_count_indexed=record.get("Number of Images"),
-                    index_path=str(index_path), index_row=row_number,
-                    eligibility_status="skipped", selection_status="skipped",
-                    reason="unsupported_modality",
-                )
+                audit.add_series(**context, eligibility_status="skipped", selection_status="skipped", reason="unsupported_modality")
+                continue
+            if modality != "CT" and not any(name.startswith("real_") for name in context["memberships"]):
+                audit.add_series(**context, eligibility_status="not_applicable", selection_status="skipped", reason="patient_not_in_real_cohort")
                 continue
             try:
-                indexed_count = int(record.get("Number of Images") or 0)
+                raw_count = record.get("Number of Images")
+                indexed_count = int(raw_count) if raw_count not in (None, "") else None
             except (TypeError, ValueError):
                 indexed_count = None
-            location = record.get("File Location", "").strip()
-            candidate = (Path(index_root) / location).resolve()
-            root = Path(index_root).resolve()
+            location = context["file_location"]
+            candidate = (root / location).resolve()
             if not location or not candidate.is_relative_to(root) or not candidate.is_dir():
-                audit.add_series(
-                    patient_id=patient_id, memberships=list(cohort.memberships[patient_id]),
-                    series_instance_uid=record.get("Series UID"),
-                    file_location=location or None,
-                    eligibility_status="blocked", reason="indexed_path_missing_or_outside_root",
-                    index_path=str(index_path), index_row=row_number,
-                )
+                audit.add_series(**context, eligibility_status="blocked", reason="indexed_path_missing_or_outside_root")
                 continue
-            series_uid = str(record.get("Series UID") or "").strip() or None
-            study_uid = str(record.get("Study UID") or "").strip() or None
+            series_uid = context["series_instance_uid"]
+            study_uid = context["study_instance_uid"]
             group_key = (patient_id, study_uid, series_uid or str(candidate), modality)
+            if candidate in directory_owners and directory_owners[candidate] != group_key:
+                raise ValueError(f"Conflicting collection index rows for the same series directory: {candidate}")
+            directory_owners[candidate] = group_key
             group = grouped[group_key]
-            group["metadata"] = {
-                "patient_id": patient_id,
-                "memberships": list(cohort.memberships[patient_id]),
-                "study_instance_uid": study_uid,
-                "series_instance_uid": series_uid,
-                "modality": modality,
-                "number_of_images_indexed": indexed_count,
-                "index_path": str(index_path),
-            }
+            if group["metadata"] is None:
+                group["metadata"] = {
+                    "patient_id": patient_id,
+                    "patient_id_raw": context["patient_id_raw"],
+                    "memberships": list(cohort.memberships[patient_id]),
+                    "study_instance_uid": study_uid,
+                    "series_instance_uid": series_uid,
+                    "modality": modality,
+                    "number_of_images_indexed": indexed_count,
+                    "index_path": str(index_path),
+                }
+            elif candidate not in group["directories"]:
+                previous = group["metadata"]["number_of_images_indexed"]
+                group["metadata"]["number_of_images_indexed"] = previous + indexed_count if previous is not None and indexed_count is not None else None
             if candidate not in group["directories"]:
                 group["directories"].append(candidate)
 
-    series_rows = []
-    for (patient_id, study_uid, series_uid, modality), group in sorted(grouped.items(), key=lambda item: tuple(str(part or "") for part in item[0])):
-        metadata = group["metadata"]
-        paths, seen = [], set()
-        for directory in group["directories"]:
-            # Retain the existing directory reader's extension and glob order;
-            # CT pixel loading still performs its established z-position sort.
-            for extension in (".dcm", ".dicom"):
-                for path in directory.glob(f"*{extension}"):
-                    if path.is_file() and path not in seen:
-                        seen.add(path)
-                        paths.append(path)
-        rows = []
-        for path in sorted(paths):
-            row = audit.add_file(
-                path=str(path.resolve()), relative_path=str(path.relative_to(index_root)),
-                patient_id=patient_id, patient_id_raw=patient_id,
-                memberships=metadata["memberships"], in_any_split=True,
-                in_real=any(name.startswith("real_") for name in metadata["memberships"]),
-                modality=modality, study_instance_uid=study_uid,
-                series_instance_uid=series_uid, sop_instance_uid=None,
-                read_status="indexed", index_path=str(index_path),
-                number_of_images_indexed=metadata["number_of_images_indexed"],
-            )
-            rows.append(row)
-        series_rows.append({"metadata": metadata, "paths": paths, "file_rows": rows})
-    return series_rows
+    for _, group in sorted(grouped.items(), key=lambda item: tuple(str(part or "") for part in item[0])):
+        yield _enumerate_indexed_series(group, root, audit)
+
+
+def _enumerate_indexed_series(group, root, audit):
+    """Enumerate only an approved group, retaining the directory reader's order."""
+    metadata = group["metadata"]
+    paths, seen = [], set()
+    for directory in group["directories"]:
+        for extension in (".dcm", ".dicom"):
+            for path in directory.glob(f"*{extension}"):
+                if path.is_file() and path not in seen:
+                    seen.add(path)
+                    paths.append(path)
+    rows = []
+    for path in sorted(paths):
+        rows.append(audit.add_file(
+            path=str(path), relative_path=str(path.relative_to(root)),
+            patient_id=metadata["patient_id"], patient_id_raw=metadata["patient_id_raw"],
+            patient_id_source="metadata.csv:Subject ID",
+            memberships=metadata["memberships"], in_any_split=True,
+            in_real=any(name.startswith("real_") for name in metadata["memberships"]),
+            modality=metadata["modality"], study_instance_uid=metadata["study_instance_uid"],
+            series_instance_uid=metadata["series_instance_uid"], sop_instance_uid=None,
+            read_status="indexed", index_path=metadata["index_path"],
+            number_of_images_indexed=metadata["number_of_images_indexed"],
+        ))
+    return {"metadata": metadata, "paths": paths, "file_rows": rows}
 
 
 def record_directory_result(audit, rows, directory_path, patient_id, *, directory=None, error=None):
@@ -134,3 +130,20 @@ def record_directory_result(audit, rows, directory_path, patient_id, *, director
         source_directories=sorted({str(Path(row["path"]).parent) for row in rows}),
         eligibility_status="eligible" if eligible else "ineligible", reason=reason,
     )
+
+
+def annotated_view_paths(paths, classifier):
+    """Retain positive annotations and at most one genuinely unannotated fallback."""
+    selected, missing, roles = set(), [], set()
+    for path in paths:
+        try:
+            role = classifier.classify(path)
+        except KeyError:
+            missing.append(path)
+            continue
+        if role in {"frontal", "lateral"}:
+            selected.add(path)
+            roles.add(role)
+    if roles != {"frontal", "lateral"} and missing:
+        selected.add(missing[len(missing) // 2])
+    return [path for path in paths if path in selected]

@@ -14,7 +14,7 @@ import csv
 import json
 from lib.data.cohort import Cohort
 from lib.data.audit import DicomAudit
-from lib.data.inventory import read_authorized_index, record_directory_result
+from lib.data.inventory import annotated_view_paths, read_authorized_index, record_directory_result
 from lib.utils.dicom import XRayJsonClassifier
 
 
@@ -115,81 +115,44 @@ class DicomDataset:
             index_root = self.root_dirpath / name
             for series in read_authorized_index(index_root, self.cohort,
                                                 self.patient_selection_annotations, self.audit):
-                paths = series["paths"]
-                series_rows = series["file_rows"]
-                metadata = series["metadata"]
-                patient_id = metadata["patient_id"]
-                if not paths:
-                    self.audit.add_series(
-                        **metadata, file_paths=[], eligibility_status="ineligible",
-                        reason="indexed_series_contains_no_dicom_paths",
-                    )
-                    continue
-                if metadata["modality"] != "CT" and not any(
-                    split.startswith("real_") for split in metadata["memberships"]
-                ):
-                    for row in series_rows:
-                        row.update(eligibility_status="not_applicable", selection_status="skipped",
-                                   processing_status="skipped", eligibility_reason="patient_not_in_real_cohort")
-                    self.audit.add_series(
-                        **metadata, file_paths=[row["path"] for row in series_rows],
-                        eligibility_status="not_applicable", reason="patient_not_in_real_cohort",
-                    )
-                    continue
-                series_file_rows = series_rows
-                if metadata["modality"] != "CT":
-                    classifier = XRayJsonClassifier()
-                    annotated_paths = []
-                    for path in paths:
-                        try:
-                            if classifier.classify(path) in {"frontal", "lateral"}:
-                                annotated_paths.append(path)
-                        except (FileNotFoundError, KeyError, ValueError):
-                            continue
-                    if annotated_paths:
-                        selected_paths = set(annotated_paths)
-                        series_file_rows = [row for row in series_rows if Path(row["path"]) in selected_paths]
-                        for row in series_rows:
-                            if Path(row["path"]) not in selected_paths:
-                                row.update(eligibility_status="not_evaluated", selection_status="skipped",
-                                           selection_reason="view_not_in_path_annotation_json",
-                                           processing_status="skipped")
-                        paths = annotated_paths
-                    else:
-                        # Keep the historical ViewPosition fallback bounded to one
-                        # representative path, rather than opening every unlabelled image.
-                        representative = paths[len(paths) // 2]
-                        series_file_rows = [row for row in series_rows if Path(row["path"]) == representative]
-                        for row in series_rows:
-                            if Path(row["path"]) != representative:
-                                row.update(eligibility_status="not_evaluated", selection_status="skipped",
-                                           selection_reason="unlabelled_series_representative_only",
-                                           processing_status="skipped")
-                        paths = [representative]
-                try:
-                    directory = DicomDirectory(paths[0].parent, dicom_paths=paths)
-                    actual_id, id_status = self.cohort.resolve_patient_id(directory.dataset_agnostic_patient_id)
-                    if id_status != "matched" or actual_id != patient_id:
-                        raise ValueError(f"Representative path ID {actual_id!r} does not match indexed Subject ID {patient_id!r}")
-                    representative = directory.dicom.dicom
-                    if str(directory.modality).upper() != metadata["modality"]:
-                        raise ValueError(f"Representative modality differs from collection index for {patient_id}")
-                    for field, key in (("StudyInstanceUID", "study_instance_uid"),
-                                       ("SeriesInstanceUID", "series_instance_uid")):
-                        expected_uid = metadata.get(key)
-                        if expected_uid and str(representative.get(field)) != expected_uid:
-                            raise ValueError(f"Representative {field} differs from collection index for {patient_id}")
-                    record_directory_result(self.audit, series_file_rows, paths[0].parent, patient_id, directory=directory)
-                    if directory.is_ct:
-                        if directory.is_valid_axial_scan:
-                            self.dataset[patient_id]["cts"].append(directory)
-                    elif directory.is_multiview:
-                        self.dataset[patient_id]["multiview"].append(directory)
-                    else:
-                        self.dataset[patient_id]["xrays"].append(directory)
-                except Exception as exc:
-                    self.logger.warning("Error classifying series for '%s': %s", patient_id, exc)
-                    record_directory_result(self.audit, series_file_rows, paths[0].parent, patient_id, error=exc)
+                self._load_indexed_series(series)
+
+    def _load_indexed_series(self, series):
+        paths, rows, metadata = series["paths"], series["file_rows"], series["metadata"]
+        patient_id = metadata["patient_id"]
+        if metadata["modality"] != "CT":
+            paths = annotated_view_paths(paths, XRayJsonClassifier())
+            selected = set(paths)
+            for row in rows:
+                if Path(row["path"]) not in selected:
+                    row.update(selection_status="skipped", processing_status="skipped",
+                               selection_reason="path_not_selected_for_view_classification")
+            rows = [row for row in rows if Path(row["path"]) in selected]
+        if not paths:
+            self.audit.add_series(**metadata, file_paths=[], eligibility_status="ineligible",
+                                  reason="no_indexed_dicom_or_eligible_view_path")
+            return
+        try:
+            directory = DicomDirectory(paths[0].parent, dicom_paths=paths)
+            header = directory.header
+            actual_id, status = self.cohort.resolve_patient_id(header.get("PatientID"))
+            if status != "matched" or actual_id != patient_id:
+                raise ValueError(f"Representative PatientID differs from collection index for {patient_id}")
+            for field, key in (("Modality", "modality"), ("StudyInstanceUID", "study_instance_uid"),
+                               ("SeriesInstanceUID", "series_instance_uid")):
+                if metadata.get(key) and str(header.get(field)) != metadata[key]:
+                    raise ValueError(f"Representative {field} differs from collection index for {patient_id}")
+            record_directory_result(self.audit, rows, paths[0].parent, patient_id, directory=directory)
+            if directory.is_ct:
+                if directory.is_valid_axial_scan:
+                    self.dataset[patient_id]["cts"].append(directory)
+            elif directory.is_multiview:
+                self.dataset[patient_id]["multiview"].append(directory)
+            else:
+                self.dataset[patient_id]["xrays"].append(directory)
+        except Exception as exc:
+            self.logger.warning("Error classifying series for '%s': %s", patient_id, exc)
+            record_directory_result(self.audit, rows, paths[0].parent, patient_id, error=exc)
 
     def filter_dataset(self, allowed_patient_ids=None):
         """
@@ -201,8 +164,12 @@ class DicomDataset:
 
         if allowed_patient_ids is None:
             if self.cohort is None:
-                raise ValueError("filter_dataset requires a split-derived allowlist or Cohort")
-            allowed_patient_ids = set(self.cohort.all_ids)
+                # Preserve the existing figure-script API outside the split-protected flow.
+                with (self.root_dirpath / "patient-selection-annotation.json").open(encoding="utf-8") as stream:
+                    selection_annotations = json.load(stream)
+                allowed_patient_ids = {patient for patient, value in selection_annotations.items() if value == "selected"}
+            else:
+                allowed_patient_ids = set(self.cohort.all_ids)
         else:
             allowed_patient_ids = set(allowed_patient_ids)
         dataset_bar = tqdm(sorted(self.keys()))

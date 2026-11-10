@@ -71,14 +71,59 @@ def test_consolidated_audit_keeps_successful_destination_on_partial_failure(tmp_
 
 def test_loading_ct_uses_only_frozen_instances_even_with_other_neighbor_files(tmp_path, monkeypatch):
     frozen = tmp_path / "selected.dcm"
+    frozen.write_bytes(b"fixture placeholder")
     record = {"path": str(frozen), "study_instance_uid": "study", "series_instance_uid": "series", "sop_instance_uid": "instance"}
     entry = {"patient_id": "patient", "selected": {"ct": {"path": str(tmp_path), "paths": [str(frozen)], "instances": [record]}}}
-    def read(path, *, stop_before_pixels):
-        assert str(path) == str(frozen) and stop_before_pixels
-        return {"PatientID": "patient", "StudyInstanceUID": "study", "SeriesInstanceUID": "series", "SOPInstanceUID": "instance"}
-    monkeypatch.setattr("lib.data.generation.pydicom.dcmread", read)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("No additional per-instance header scan is allowed")
+    monkeypatch.setattr("lib.dicom.pydicom.dcmread", forbidden)
     constructor = Mock(return_value=object())
     monkeypatch.setattr("lib.data.generation.GenericDicomDirectory", constructor)
-    monkeypatch.setattr("lib.data.generation.CTScanDirectory", lambda value: SimpleNamespace(is_valid_axial_scan=True))
+    monkeypatch.setattr("lib.data.generation.CTScanDirectory", lambda value: SimpleNamespace(
+        is_valid_axial_scan=True, header={"PatientID": "patient", "SeriesInstanceUID": "series"}))
     load_selected_exams(entry, CohortStub())
     assert constructor.call_args.kwargs["dicom_paths"] == [str(frozen)]
+
+
+def test_destination_writes_reuse_drrs_for_the_same_frozen_ct(tmp_path, monkeypatch):
+    import numpy as np
+    from lib.io import PatientDataStorer
+    from lib.utils.utils import Cache
+
+    class Scan:
+        def __init__(self):
+            self.cache, self.drr_calls = Cache(), 0
+            self.header, self.spacing = {}, (1, 1, 1)
+        def get_array(self):
+            return np.zeros((2, 2, 2))
+        @property
+        def drr_generator(self):
+            self.drr_calls += 1
+            return SimpleNamespace(frontal_view=np.ones((2, 2)), lateral_view=np.full((2, 2), 2))
+    class Processor:
+        def __init__(self, array, scan):
+            self.array = array.copy()
+        def _transpose(self):
+            pass
+        def _resize(self):
+            pass
+    published, sources = [], []
+    def publish(self, output, temporary, compression, arrays, legacy, metadata):
+        published.append(arrays)
+        sources.append(metadata["training_xray_source"])
+    monkeypatch.setattr("lib.io.CTProcessor", Processor)
+    monkeypatch.setattr(PatientDataStorer, "_publish_arrays", publish)
+    ct = Scan()
+    for destination, real_views in (("synthetic_train", False), ("mixed_train", False),
+                                     ("real_train", True), ("mixed_test", True)):
+        plan = {"ct": ct, "destination": destination}
+        if real_views:
+            plan.update(frontal=SimpleNamespace(get_array=lambda: np.full((2, 2), 3), header={}),
+                        lateral=SimpleNamespace(get_array=lambda: np.full((2, 2), 4), header={}))
+        PatientDataStorer("patient", {"cts": [ct], "xrays": [], "multiview": []},
+                          selection_plan=plan).store_to_file(tmp_path / destination)
+    assert ct.drr_calls == 1
+    assert published[0]["xray1"] is published[1]["xray1"]
+    assert np.array_equal(published[0]["ct"], published[1]["ct"])
+    assert sources == ["drr", "drr", "real_xray", "real_xray"]
+    assert np.all(published[3]["xray1"] == 3)

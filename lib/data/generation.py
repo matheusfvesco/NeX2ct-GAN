@@ -10,7 +10,7 @@ PROCESSING_CONTRACT_VERSION = 2
 
 
 def load_selected_exams(entry, cohort):
-    """Validate every selected instance before constructing any pixel processor."""
+    """Check frozen paths and representative headers without a second CT header scan."""
     patient_id = entry["patient_id"]
     selected = entry.get("selected", {})
     for role in ("ct", "frontal", "lateral"):
@@ -29,7 +29,7 @@ def load_selected_exams(entry, cohort):
         raise ValueError(f"No frozen CT for {patient_id}")
     directory = GenericDicomDirectory(ct_record["path"], dicom_paths=ct_record["paths"])
     ct = CTScanDirectory(directory)
-    representative = ct.dicom.dicom
+    representative = ct.header
     resolved, status = cohort.resolve_patient_id(representative.get("PatientID"))
     if status != "matched" or resolved != patient_id:
         raise ValueError(f"Representative CT header no longer belongs to {patient_id}")
@@ -50,7 +50,7 @@ def load_selected_exams(entry, cohort):
             if status != "matched" or resolved != patient_id:
                 raise ValueError(f"Selected radiograph no longer belongs to {patient_id}/{role}")
             expected_series = candidate.get("series_instance_uid")
-            if expected_series and str(view.dicom.get("SeriesInstanceUID")) != expected_series:
+            if expected_series and str(view.header.get("SeriesInstanceUID")) != expected_series:
                 raise ValueError(f"Selected radiograph SeriesInstanceUID changed for {patient_id}/{role}")
             result[role] = view
     return result

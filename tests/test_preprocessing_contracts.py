@@ -228,3 +228,62 @@ def test_respiratory_text_does_not_infer_anatomical_state_from_technique_or_cont
 def test_respiratory_structured_and_textual_disagreement_is_explicit():
     result = extract_respiratory_evidence({"StartingRespiratoryPhase": "EXPIRATION", "SeriesDescription": "INSPIRATION"})
     assert result["conflicting_sources"]
+
+
+def test_respiratory_audit_reuses_the_selected_representative_header(monkeypatch):
+    from lib.data.respiratory import audit_selected_exams
+
+    header = SimpleNamespace(filename="selected.dcm", StartingRespiratoryPhase="INSPIRATION")
+    candidate = {"instances": [{"path": "selected.dcm"}], "_object": SimpleNamespace(header=header)}
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the selected header is already available")
+    monkeypatch.setattr("lib.data.respiratory.pydicom.dcmread", forbidden)
+    result = audit_selected_exams({"ct": candidate})
+    assert result["ct"]["evidence"][0]["status"] == "explicit_dicom"
+
+
+def test_ct_provenance_uses_pixel_reads_without_changing_z_order(tmp_path, monkeypatch):
+    import numpy as np
+    from lib.dicom import CTScanDirectory
+
+    paths = [tmp_path / "low.dcm", tmp_path / "high.dcm"]
+    class Slice(dict):
+        @property
+        def pixel_array(self):
+            return np.full((2, 2), self["ImagePositionPatient"][2])
+    datasets = {
+        path: Slice(PatientID="patient", SeriesInstanceUID="series", StudyInstanceUID="study",
+                    SOPInstanceUID=path.stem, Rows=512, Columns=512, ImagePositionPatient=[0, 0, z])
+        for path, z in zip(paths, (1, 2))
+    }
+    calls = []
+    def read(path):
+        calls.append(path)
+        return datasets[path]
+    monkeypatch.setattr("lib.dicom.pydicom.dcmread", read)
+    ct = CTScanDirectory.__new__(CTScanDirectory)
+    ct._paths_to_dicom_files = paths
+    ct._header = {"PatientID": "patient", "SeriesInstanceUID": "series"}
+    volume = ct._get_raw_array()
+    assert calls == paths
+    assert np.all(volume[:, :, 0] == 2) and np.all(volume[:, :, 1] == 1)
+    assert [row["sop_instance_uid"] for row in ct.source_instances] == ["low", "high"]
+
+
+def test_image_array_wrappers_do_not_add_a_duplicate_dicom_read(monkeypatch):
+    from unittest.mock import Mock
+    import numpy as np
+    from lib.dicom import CTSlice, XRayView
+
+    image = np.zeros((2, 2))
+    def forbidden(*args, **kwargs):
+        raise AssertionError("get_raw_array is responsible for the pixel read")
+    monkeypatch.setattr("lib.dicom.pydicom.dcmread", forbidden)
+    processor = SimpleNamespace(process=Mock(return_value=image))
+    monkeypatch.setattr("lib.dicom.XRayProcessor", Mock(return_value=processor))
+    for cls in (XRayView, CTSlice):
+        view = cls.__new__(cls)
+        view.get_raw_array = Mock(return_value=image)
+        assert view.get_array() is image
+        view.get_raw_array.assert_called_once_with()
+    processor.process.assert_called_once_with()

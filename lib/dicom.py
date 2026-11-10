@@ -13,7 +13,7 @@ import numpy as np
 
 # from scipy import ndimage # for applying masks
 # from skimage import morphology # for applying masks
-from functools import wraps
+from functools import partial, wraps
 from datetime import date, datetime
 from abc import ABC
 
@@ -23,6 +23,7 @@ from lib.process.preprocess import CTProcessor, XRayProcessor
 from lib.process.drr import DRRGenerator
 from lib.utils.dicom import XRayJsonClassifier
 from lib.data.temporal import comparable_datetime, parse_acquisition_time
+from lib.data.cohort import normalize_patient_id
 
 
 def _parse_acquisition_datetime(dataset) -> dict:
@@ -30,18 +31,12 @@ def _parse_acquisition_datetime(dataset) -> dict:
     return parse_acquisition_time(dataset)
 
 
-def get_middle_dicom_filedataset(func):
-    """If dicom FileDataset is already loaded in object(during init), uses it.
-    Otherwise, loads from disk and passes it to function
-    class meant for Directory classes"""
+def get_middle_dicom_filedataset(func, *, header_only=False):
+    """Pass a directory's representative object, or a retained metadata-only header."""
 
     @wraps(func)
     def wrapper(self, *args, **kwargs):
-        dicom = (
-            DicomFile(self._paths_to_dicom_files[self.__len__() // 2])
-            if not hasattr(self, "dicom")
-            else self.dicom
-        )
+        dicom = self.header if header_only else self.dicom
         return func(self, dicom, *args, **kwargs)
 
     return wrapper
@@ -63,6 +58,9 @@ def get_dicom_filedataset(func):
         return func(self, dicom, *args, **kwargs)
 
     return wrapper
+
+
+get_dicom_header = partial(get_middle_dicom_filedataset, header_only=True)
 
 
 class BaseDicomFile(ABC):
@@ -111,6 +109,11 @@ class BaseDicomFile(ABC):
             return pydicom.dcmread(self.dicom_path)
 
     @property
+    def header(self) -> FileDataset:
+        """Metadata retained from construction; never reload PixelData for tags."""
+        return self._header
+
+    @property
     def raw_visualizer(self) -> ArrayDisplayUtility:
         """
         Returns a visualizer utility for the unprocessed array
@@ -138,7 +141,7 @@ class BaseDicomFile(ABC):
     def __repr__(self):
         return f"{self.__class__.__name__}('{self.dicom_path}')"
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_modality(self, dicom: FileDataset) -> str:
         return dicom.Modality
 
@@ -171,11 +174,11 @@ class BaseDicomFile(ABC):
         self.rows, self.columns = self.get_image_dimensions()
         self.dataset = self.get_dataset()
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_patient_id(self, dicom: FileDataset) -> str:
         return dicom.get("PatientID")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_dataset_agnostic_patient_id(self, dicom: FileDataset) -> str:
         patient_id = str(dicom.PatientID)
 
@@ -188,24 +191,24 @@ class BaseDicomFile(ABC):
 
         return dataset_agnostic_patient_id
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_modality(self, dicom: FileDataset) -> str:
         return dicom.get("Modality")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_acquisition_time(self, dicom: FileDataset) -> dict:
         return _parse_acquisition_datetime(dicom)
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_acquisition_datetime(self, dicom: FileDataset) -> date | datetime | None:
         """Compatibility accessor; missing/invalid timestamps no longer reject a DICOM."""
         return _parse_acquisition_datetime(dicom)["parsed"]
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_body_part_examined(self, dicom: FileDataset) -> str:
         return dicom.get("BodyPartExamined", None)
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_windowing_information(self, dicom: FileDataset) -> tuple[int, int]:
         window_center = get_multival_by_index(dicom.get("WindowCenter"), index=0)
         window_center = (
@@ -215,23 +218,23 @@ class BaseDicomFile(ABC):
         window_center = int(window_width) if window_width is not None else window_width
         return window_center, window_width
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_rescale_information(self, dicom: FileDataset) -> tuple[int, int]:
         return dicom.get("RescaleSlope"), dicom.get("RescaleIntercept")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_photometric_interpretation(self, dicom: FileDataset) -> str:
         return dicom.get("PhotometricInterpretation")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_bits_information(self, dicom: FileDataset) -> str:
         return dicom.get("BitsAllocated"), dicom.get("BitsStored")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_image_dimensions(self, dicom: FileDataset) -> str:
         return dicom.get("Rows"), dicom.get("Columns")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_dataset(self, dicom: FileDataset) -> str:
         element = dicom.get((0x0013, 0x1010))
         return element.value if element is not None else None
@@ -241,10 +244,10 @@ class BaseDicomFile(ABC):
         return dicom
 
     def _load_dicom(self, stop_before_pixels=False):
-        self.cache.add(
-            "dicom",
-            pydicom.dcmread(self.dicom_path, stop_before_pixels=stop_before_pixels),
-        )
+        dataset = pydicom.dcmread(self.dicom_path, stop_before_pixels=stop_before_pixels)
+        if stop_before_pixels:
+            self._header = dataset
+        self.cache.add("dicom", dataset)
         return True
 
     def _unload_dicom(self):
@@ -302,8 +305,7 @@ class XRayView(BaseDicomFile):
         # original, derived, etc.
         self.image_type = self._get_image_type()
 
-    @get_dicom_filedataset
-    def get_array(self, dicom: FileDataset) -> np.ndarray:
+    def get_array(self) -> np.ndarray:
         """
         Returns the preprocessed array of the X Ray View
         """
@@ -311,7 +313,7 @@ class XRayView(BaseDicomFile):
 
         return processed_array
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_windowing_information(
         self, dicom: FileDataset, index: int = 0
     ) -> tuple[int, int, str]:
@@ -339,16 +341,14 @@ class XRayView(BaseDicomFile):
             self.view_type_source = "unresolved"
             return None
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_view_position(self, dicom: FileDataset) -> str:
         return dicom.get("ViewPosition")
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_image_type(self, dicom: FileDataset) -> str:
         image_type = dicom.get("ImageType")  # this is a list of two itens.
-        return image_type[
-            0
-        ]  # Gets the first string, which should be "ORIGINAL" or "DERIVED"
+        return image_type[0] if image_type else None
 
 
 class CTSlice(BaseDicomFile):
@@ -393,11 +393,11 @@ class CTSlice(BaseDicomFile):
         self.image_orientation_patient = self._get_image_orientation_patient()
         self.pixel_spacing: tuple[float, float] = self._get_pixel_spacing()
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def get_image_position_patient(self, dicom: FileDataset) -> tuple:
         return tuple(dicom.ImagePositionPatient)  # return (x, y, z)
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_windowing_information(
         self, dicom: FileDataset, index: int = 0
     ) -> tuple[int, int, int, int]:
@@ -411,7 +411,7 @@ class CTSlice(BaseDicomFile):
         self.slope = int(get_multival_by_index(dicom.get("RescaleSlope"), index))
         return self.window_center, self.window_width, self.intercept, self.slope
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_raw_windowing_information(
         self, dicom: FileDataset
     ) -> tuple[int, int, int, int]:
@@ -422,22 +422,21 @@ class CTSlice(BaseDicomFile):
         return window_center, window_width, intercept, slope
 
     @property
-    @get_dicom_filedataset
+    @get_dicom_header
     def has_windowing_information(self, dicom: FileDataset):
         tags = ["WindowCenter", "WindowWidth", "RescaleIntercept", "RescaleSlope"]
         return all(dicom.get(tag) is not None for tag in tags)
         # check if all these tags are not None and return either True or False
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_image_orientation_patient(self, dicom: FileDataset):
         return dicom.get("ImageOrientationPatient", None)
 
-    @get_dicom_filedataset
+    @get_dicom_header
     def _get_pixel_spacing(self, dicom: FileDataset) -> tuple[float, float]:
         return tuple(map(float, dicom.PixelSpacing))
 
-    @get_dicom_filedataset
-    def get_array(self, dicom: FileDataset) -> np.ndarray:
+    def get_array(self) -> np.ndarray:
         # processed_array = self._preprocess_array(dicom=dicom)
 
         return self.get_raw_array()
@@ -489,6 +488,7 @@ class BaseDicomDir(ABC):
             )
         self.cache = Cache()
         self._load_dicom()  # loads middle dcm into the cache
+        self._header = self.dicom.header
         self.modality = self._get_modality()
         self.is_ct = True if self.modality == "CT" else False
         self.is_multiview = True if not self.is_ct and len(self) > 1 else False
@@ -528,6 +528,10 @@ class BaseDicomDir(ABC):
             return self.cache["dicom"]
         else:
             return self.get_middle_dcm()
+
+    @property
+    def header(self) -> FileDataset:
+        return self._header
 
     @property
     def is_array_cached(self):
@@ -879,11 +883,28 @@ class CTScanDirectory(BaseDicomDir):
     def _get_windowing_information(self, dicom: CTSlice, index: int = 0):
         return dicom._get_windowing_information(index=index)
 
+    def _record_source_instances(self, files, dicoms):
+        """Use already-loaded instances for provenance and patient/series checks."""
+        self.source_instances = []
+        for path, dicom in zip(files, dicoms):
+            if normalize_patient_id(dicom.get("PatientID")) != normalize_patient_id(self.header.get("PatientID")):
+                raise ValueError(f"CT instance PatientID differs from its selected series: {path}")
+            expected_series = self.header.get("SeriesInstanceUID")
+            if expected_series and dicom.get("SeriesInstanceUID") != expected_series:
+                raise ValueError(f"CT instance SeriesInstanceUID differs from its selected series: {path}")
+            self.source_instances.append({
+                "path": str(path), "study_instance_uid": dicom.get("StudyInstanceUID"),
+                "series_instance_uid": dicom.get("SeriesInstanceUID"),
+                "sop_instance_uid": dicom.get("SOPInstanceUID"),
+                "used_for_volume": int(dicom.get("Rows")) == 512 and int(dicom.get("Columns")) == 512,
+            })
+
     def _get_raw_array(
         self, use_z_ordering=True, reverse_order=False, **kwargs
     ) -> np.ndarray:
         if use_z_ordering:  # usual step, doesn't order files before loading
-            dicoms = [pydicom.dcmread(path) for path in self._paths_to_dicom_files]
+            files = self._paths_to_dicom_files
+            dicoms = [pydicom.dcmread(path) for path in files]
         else:
             files = sorted(
                 [path for path in self._paths_to_dicom_files],
@@ -891,6 +912,8 @@ class CTScanDirectory(BaseDicomDir):
                 reverse=reverse_order,  # should usually order in "0, 1, 2", and if reversed, "2, 1, 0"
             )
             dicoms = [pydicom.dcmread(path) for path in files]
+
+        self._record_source_instances(files, dicoms)
 
         # filters arrays to only arrays with shape 512x512
         dicoms = [
@@ -1055,6 +1078,7 @@ class SingleViewXRayDirectory(BaseDicomDir):
         for attr in vars(dicom_dir):
             setattr(self, attr, getattr(dicom_dir, attr))
 
+        self.cache.add("views_by_path", {self._paths_to_dicom_files[0]: self.dicom})
         self._unload_dicom()
 
     @property
@@ -1090,10 +1114,7 @@ class SingleViewXRayDirectory(BaseDicomDir):
         Returns:
             str: The view type of the DICOM image.
         """
-        try:
-            return XRayJsonClassifier().classify(self._paths_to_dicom_files[0])
-        except (FileNotFoundError, KeyError, ValueError):
-            return None
+        return self.get_view().view_type
 
     @property
     def image_type(self) -> str:
@@ -1109,7 +1130,8 @@ class SingleViewXRayDirectory(BaseDicomDir):
         return self[0].image_type
 
     def get_view(self):
-        return self[0]
+        views = self.cache.get("views_by_path", {})
+        return views[self._paths_to_dicom_files[0]] if views else self[0]
 
 
 class MultiviewXRayDirectory(BaseDicomDir):
@@ -1144,15 +1166,16 @@ class MultiviewXRayDirectory(BaseDicomDir):
         where each key is a view_type ('frontal' or 'lateral') and its
         value is a list of the filepaths that refer to that view_type
         """
-        classifier = XRayJsonClassifier()
-        self.filenames_to_view_type = {}
-        for path in self._paths_to_dicom_files:
-            try:
-                view_type = classifier.classify(path)
-            except (FileNotFoundError, KeyError, ValueError):
-                continue
-            if view_type:
-                self.filenames_to_view_type[path] = view_type
+        representative = self.dicom
+        views = {
+            path: representative if path == representative.dicom_path else DicomFile(path)
+            for path in self._paths_to_dicom_files
+        }
+        self.cache.add("views_by_path", views)
+        self.filenames_to_view_type = {
+            path: view.view_type for path, view in views.items()
+            if view.view_type and not (view.is_dx and view.is_derived)
+        }
 
         # creates the inverse of the filenames_to_view_types dictionary,
         # so each key(view_type) returns a list of the filenames that
@@ -1172,7 +1195,8 @@ class MultiviewXRayDirectory(BaseDicomDir):
         if type == "lateral" and not self.has_lateral:
             return None
 
-        for view in self:
+        cached_views = self.cache.get("views_by_path")
+        for view in (cached_views.values() if cached_views is not None else self):
             if view.view_type != type:
                 continue
             if view.is_dx:
