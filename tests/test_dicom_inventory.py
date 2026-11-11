@@ -3,7 +3,8 @@ from types import SimpleNamespace
 import pytest
 
 from lib.data.audit import DicomAudit
-from lib.data.inventory import annotated_view_paths, read_authorized_index
+from lib.data.cohort import Cohort, SPLIT_FILES
+from lib.data.inventory import annotated_view_paths, read_authorized_index, select_subset_by_dataset
 
 
 class CohortStub:
@@ -34,6 +35,186 @@ def test_index_groups_series_from_multiple_paths_without_reading_headers(tmp_pat
     assert by_uid["series-a"]["metadata"]["number_of_images_indexed"] == 2
 
 
+def test_unexpected_patient_is_audited_then_stops_by_default(tmp_path):
+    root = tmp_path / "source"
+    root.mkdir()
+    index = root / "metadata.csv"
+    index.write_text(
+        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        "series-extra,external,study,CT,1,./extra\n", encoding="utf-8"
+    )
+    audit = DicomAudit()
+    with pytest.raises(ValueError, match="outside_all_splits"):
+        list(read_authorized_index(root, CohortStub(), {}, audit))
+    assert audit.series[0]["patient_id_raw"] == "external"
+    assert audit.series[0]["series_instance_uid"] == "series-extra"
+    assert audit.series[0]["expected_patient"] is False
+
+
+def test_subset_sampling_is_deterministic_stratified_and_counts_unique_patients(tmp_path):
+    splits_dir = tmp_path / "splits"
+    splits_dir.mkdir()
+    for name in SPLIT_FILES:
+        ids = [f"p{i}" for i in range(6)] if name == "synthetic_train.txt" else []
+        (splits_dir / name).write_text("".join(f"{patient_id}\n" for patient_id in ids), encoding="utf-8")
+    cohort = Cohort(splits_dir)
+    roots = [tmp_path / name for name in ("dataset-a", "dataset-b", "dataset-c")]
+    records = {
+        "dataset-a": ["p0", "p1", "p2", "p3", "p4"],
+        "dataset-b": ["p1", "p2", "p4", "p5"],
+        "dataset-c": ["p0", "p2"],
+    }
+    for root in roots:
+        root.mkdir()
+        rows = records[root.name]
+        (root / "metadata.csv").write_text(
+            "Series UID,Subject ID,Study UID,Modality,File Location\n" +
+            "".join(f"series-{index},{patient_id},study,CT,./missing-{index}\n"
+                    for index, patient_id in enumerate(rows + rows[:1])),
+            encoding="utf-8",
+        )
+
+    first = select_subset_by_dataset(tmp_path, list(records), cohort, 3)
+    for root in roots:
+        rows = records[root.name][::-1]
+        (root / "metadata.csv").write_text(
+            "Series UID,Subject ID,Study UID,Modality,File Location\n" +
+            "".join(f"series-{index},{patient_id},study,CT,./missing-{index}\n"
+                    for index, patient_id in enumerate(rows + rows[:1])),
+            encoding="utf-8",
+        )
+    second = select_subset_by_dataset(tmp_path, list(reversed(records)), cohort, 3)
+    assert first[0] == second[0]
+    assert [len(first[0][name]) for name in sorted(records)] == [3, 3, 2]
+    assert all(len(set(ids)) == len(ids) for ids in first[0].values())
+    assert first[1][0]["selected_patient_ids"] == sorted(first[1][0]["selected_patient_ids"])
+    assert first[1][2]["selected_count"] == 2
+
+
+def test_subset_is_identical_in_fresh_processes_with_different_hash_seeds(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "metadata.csv").write_text(
+        "Series UID,Subject ID,Study UID,Modality,File Location\n" +
+        "".join(f"s{i},p{i},study,CT,./missing\n" for i in range(20)), encoding="utf-8")
+    script = (
+        "import json,sys; from types import SimpleNamespace; "
+        "from lib.data.inventory import select_subset_by_dataset; "
+        "cohort=SimpleNamespace(resolve_patient_id=lambda raw:(raw,'matched')); "
+        "selected,_,_=select_subset_by_dataset(sys.argv[1],['source'],cohort,3); "
+        "print(json.dumps({key:sorted(ids) for key,ids in selected.items()},sort_keys=True))"
+    )
+    outputs = [subprocess.check_output(
+        [sys.executable, "-c", script, str(tmp_path)],
+        env={**os.environ, "PYTHONHASHSEED": seed}, text=True)
+        for seed in ("1", "7729")]
+    assert outputs[0] == outputs[1]
+    assert len(json.loads(outputs[0])["source"]) == 3
+
+
+def test_subset_limits_inventory_before_enumerating_unselected_patient_paths(tmp_path):
+    root = tmp_path / "source"
+    chosen = root / "chosen"
+    unselected = root / "unselected"
+    chosen.mkdir(parents=True)
+    unselected.mkdir()
+    (chosen / "one.dcm").write_bytes(b"fixture")
+    (unselected / "two.dcm").write_bytes(b"fixture")
+    (root / "metadata.csv").write_text(
+        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        "chosen-series,included,study,CT,1,./chosen\n"
+        "unselected-series,other,study,CT,1,./unselected\n", encoding="utf-8"
+    )
+    cohort = CohortStub()
+    cohort.memberships = {"included": ("synthetic_train.txt",), "other": ("synthetic_train.txt",)}
+    cohort.resolve_patient_id = lambda raw: (raw, "matched")
+    cohort.subset_by_dataset = {"source": {"included"}}
+    cohort.subset_index_hashes = {}
+    audit = DicomAudit()
+    result = list(read_authorized_index(root, cohort, {}, audit))
+    assert len(result) == 1
+    assert [row["path"] for row in audit.files] == [str(chosen / "one.dcm")]
+    skipped = next(row for row in audit.series if row.get("series_instance_uid") == "unselected-series")
+    assert skipped["scope_status"] == "not_selected_by_subset"
+    assert skipped["file_paths"] == []
+
+
+def test_subset_does_not_abort_on_external_index_rows_but_full_run_does(tmp_path):
+    root = tmp_path / "source"
+    chosen = root / "chosen"
+    chosen.mkdir(parents=True)
+    (chosen / "one.dcm").write_bytes(b"fixture")
+    (root / "metadata.csv").write_text(
+        "Series UID,Subject ID,Study UID,Modality,File Location\n"
+        "extra,outside,study,CT,./nonexistent\n"
+        "chosen,included,study,CT,./chosen\n", encoding="utf-8")
+    cohort = CohortStub()
+    cohort.subset_by_dataset = {"source": {"included"}}
+    audit = DicomAudit()
+    result = list(read_authorized_index(root, cohort, {}, audit))
+    assert len(result) == 1
+    assert audit.series[0]["reason"] == "not_selected_by_subset"
+    assert audit.series[0]["expected_patient"] is False
+    assert [row["patient_id"] for row in audit.files] == ["included"]
+    with pytest.raises(ValueError, match="outside_all_splits"):
+        list(read_authorized_index(root, CohortStub(), {}, DicomAudit()))
+
+
+def test_subset_preserves_full_memberships_but_scopes_expected_ids(tmp_path):
+    splits_dir = tmp_path / "splits"
+    splits_dir.mkdir()
+    for name in SPLIT_FILES:
+        ids = ["chosen", "not-chosen"] if name == "synthetic_train.txt" else []
+        (splits_dir / name).write_text("".join(f"{patient_id}\n" for patient_id in ids), encoding="utf-8")
+    cohort = Cohort(splits_dir)
+    cohort.active_patient_ids = {"chosen"}
+    assert cohort.all_ids == ("chosen", "not-chosen")
+    assert cohort.processing_ids == ("chosen",)
+    assert cohort.expected_ids("synthetic_train.txt") == ("chosen",)
+    assert cohort.memberships["not-chosen"] == ("synthetic_train.txt",)
+
+
+def test_subset_output_validation_allows_prior_authorized_patients_outside_sample(tmp_path, monkeypatch):
+    from lib.data.validation import validate_split_outputs
+
+    splits_dir = tmp_path / "splits"
+    splits_dir.mkdir()
+    for name in SPLIT_FILES:
+        ids = ["chosen", "other"] if name == "synthetic_train.txt" else []
+        (splits_dir / name).write_text("".join(f"{patient_id}\n" for patient_id in ids), encoding="utf-8")
+    cohort = Cohort(splits_dir)
+    cohort.active_patient_ids = {"chosen"}
+    synthetic_train = tmp_path / "output" / "synthetic" / "synthetic_train"
+    for patient_id in ("chosen", "other"):
+        patient_dir = synthetic_train / patient_id
+        patient_dir.mkdir(parents=True)
+        (patient_dir / "ct_xray_data.h5").touch()
+    monkeypatch.setattr("lib.data.validation._validate_output", lambda *args: None)
+    roots = {
+        name: tmp_path / "output" / name.removesuffix(".txt").split("_")[0] / name.removesuffix(".txt")
+        for name in SPLIT_FILES
+    }
+    report = validate_split_outputs(cohort, roots)
+    train = next(row for row in report["splits"] if row["split"] == "synthetic_train.txt")
+    assert report["success"]
+    assert train["expected_ids"] == ["chosen"]
+    assert train["out_of_scope_ids"] == ["other"]
+    assert train["unexpected_ids"] == []
+
+    unauthorized = synthetic_train / "unauthorized"
+    unauthorized.mkdir()
+    (unauthorized / "ct_xray_data.h5").touch()
+    report = validate_split_outputs(cohort, roots)
+    train = next(row for row in report["splits"] if row["split"] == "synthetic_train.txt")
+    assert not report["success"]
+    assert train["unexpected_ids"] == ["unauthorized"]
+
+
 def test_annotation_excludes_series_before_enumerating_its_dicom_paths(tmp_path, monkeypatch):
     root = tmp_path / "source"
     root.mkdir()
@@ -42,7 +223,9 @@ def test_annotation_excludes_series_before_enumerating_its_dicom_paths(tmp_path,
         "series-x,included,study,CT,100000,./not-present\n", encoding="utf-8"
     )
     audit = DicomAudit()
-    result = list(read_authorized_index(root, CohortStub(), {"included": "excluded"}, audit))
+    cohort = CohortStub()
+    cohort.continue_on_error = True
+    result = list(read_authorized_index(root, cohort, {"included": "excluded"}, audit))
     assert result == []
     assert audit.files == []
     assert audit.series[0]["reason"] == "patient_selection_annotation_conflict"
@@ -74,7 +257,9 @@ def test_loader_constructs_only_authorized_frozen_series(tmp_path, monkeypatch):
     monkeypatch.setattr("lib.dicom.pydicom.dcmread", forbidden_read)
     monkeypatch.setattr("lib.data.dicom.DicomDirectory", classify)
     logger = SimpleNamespace(info=lambda *args: None, warning=lambda *args: None)
-    dataset = DicomDataset(tmp_path, accepted_datasets=["source"], cohort=CohortStub(), logger=logger)
+    cohort = CohortStub()
+    cohort.continue_on_error = True
+    dataset = DicomDataset(tmp_path, accepted_datasets=["source"], cohort=cohort, logger=logger)
     dataset.patient_selection_annotations = {"included": "selected", "outside": "selected"}
     dataset.load()
     assert len(calls) == 2

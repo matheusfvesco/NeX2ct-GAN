@@ -104,6 +104,31 @@ def _write_destination(entry, exams, destination, output_root, logger):
     ).store_to_file(destination_root(output_root, destination))
 
 
+def _record_unattempted_destinations(patient_id, pending_items, start, results, journal):
+    for destination, (path, attempt) in pending_items[start:]:
+        results[destination] = {
+            "status": "not_attempted", "output_path": str(path),
+            "attempt": attempt, "reason": "previous_destination_failed",
+        }
+        journal.append({"patient_id": patient_id, "destination": destination, **results[destination]})
+
+
+def _write_pending_destinations(entry, exams, pending_items, output_root, logger, journal):
+    patient_id = entry["patient_id"]
+    results = {}
+    for index, (destination, (path, attempt)) in enumerate(pending_items):
+        try:
+            _write_destination(entry, exams, destination, output_root, logger)
+            results[destination] = {"status": "processed", "output_path": str(path), "attempt": attempt}
+        except Exception as exc:
+            results[destination] = _failed_result(exc, path, attempt, "processing_failed")
+        journal.append({"patient_id": patient_id, "destination": destination, **results[destination]})
+        if results[destination]["status"] == "processing_failed" and not getattr(journal, "continue_on_error", False):
+            _record_unattempted_destinations(patient_id, pending_items, index + 1, results, journal)
+            return results
+    return results
+
+
 def process_patient(entry, cohort, output_root, journal, logger=None):
     """Track each authorized destination independently and continue after local failure."""
     patient_id = entry["patient_id"]
@@ -126,14 +151,9 @@ def process_patient(entry, cohort, output_root, journal, logger=None):
             results[destination] = _failed_result(exc, path, attempt, "frozen_selection_invalid")
             journal.append({"patient_id": patient_id, "destination": destination, **results[destination]})
         return results
+    pending_items = list(pending.items())
     try:
-        for destination, (path, attempt) in pending.items():
-            try:
-                _write_destination(entry, exams, destination, output_root, logger)
-                results[destination] = {"status": "processed", "output_path": str(path), "attempt": attempt}
-            except Exception as exc:
-                results[destination] = _failed_result(exc, path, attempt, "processing_failed")
-            journal.append({"patient_id": patient_id, "destination": destination, **results[destination]})
+        results.update(_write_pending_destinations(entry, exams, pending_items, output_root, logger, journal))
     finally:
         for exam in exams.values():
             if exam is not None:

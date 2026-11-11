@@ -51,6 +51,16 @@ def _patient_hdf5_metadata(path):
                             "error": {"type": type(exc).__name__, "message": str(exc)}}
 
 
+def _expected_real_ids(cohort, manifest):
+    expected = set(cohort.real_ids)
+    if manifest.get("subset") is None:
+        return expected
+    active = set(manifest["active_patient_ids"])
+    if not active <= set(cohort.all_ids):
+        raise ValueError("Subset contains unauthorized patient IDs")
+    return expected & active
+
+
 def export_clinical_audit(
     manifest_path: Path,
     audit_path: Path,
@@ -61,13 +71,16 @@ def export_clinical_audit(
     hdf5_root: Path | None = None,
 ) -> list[dict]:
     manifest = _read_json(manifest_path, {})
+    run_report = manifest if "selection" in manifest else None
+    if run_report is not None:
+        manifest = run_report["selection"]
     if manifest.get("schema_version") != 1 or "splits_dir" not in manifest:
         raise ValueError("A valid versioned selection manifest is required")
     cohort = Cohort(manifest["splits_dir"])
     if manifest.get("split_hashes") != {name: split.sha256 for name, split in cohort.splits.items()}:
         raise ValueError("Splits differ from the prepared cohort")
-    audit = _read_json(audit_path, {})
-    events = _read_json(events_path, {})
+    audit = run_report if run_report is not None else _read_json(audit_path, {})
+    events = run_report if run_report is not None else _read_json(events_path, {})
     interventions = _read_json(interventions_path, {}) if interventions_path else None
     audit_patients = {row.get("patient_id"): row for row in audit.get("patients", [])}
     event_by_patient = {}
@@ -78,7 +91,7 @@ def export_clinical_audit(
         for item in manifest.get("patients", [])
         if any(name.startswith("real_") for name in item.get("memberships", []))
     }
-    if real_ids != set(cohort.real_ids):
+    if real_ids != _expected_real_ids(cohort, manifest):
         raise ValueError("Manifest real population does not match the authoritative splits")
     intervention_by_id = validate_interventions(interventions, real_ids)
     real_rows = [item for item in manifest.get("patients", []) if item.get("patient_id") in real_ids]
@@ -155,6 +168,7 @@ def export_clinical_audit(
 
     summary = {
         "schema_version": 1,
+        "execution_scope": "subset" if manifest.get("subset") is not None else "full",
         "real_patient_count": len(rows),
         "complete_three_image_pair_count": sum(row["evaluability"]["complete_three_image_pair"] for row in rows),
         "ct_frontal_interval_evaluable_count": sum(row["evaluability"]["ct_frontal_interval"] for row in rows),
@@ -180,13 +194,18 @@ def export_clinical_audit(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--manifest", type=Path, required=True)
-    parser.add_argument("--audit", type=Path, required=True)
-    parser.add_argument("--events", type=Path, required=True)
+    parser.add_argument("--run", type=Path, help="Consolidated preprocessing audit/run.json")
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--audit", type=Path)
+    parser.add_argument("--events", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--interventions", type=Path)
     parser.add_argument("--hdf5-root", type=Path)
     args = parser.parse_args(argv)
+    if args.run:
+        args.manifest = args.audit = args.events = args.run
+    elif not all((args.manifest, args.audit, args.events)):
+        parser.error("provide --run, or all of --manifest, --audit and --events")
     export_clinical_audit(args.manifest, args.audit, args.events, args.output_dir, interventions_path=args.interventions, hdf5_root=args.hdf5_root)
     return 0
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +65,8 @@ class Cohort:
         self.splits_dir = Path(splits_dir)
         self.splits: dict[str, SplitSnapshot] = {}
         self.memberships: dict[str, tuple[str, ...]] = {}
+        self.active_patient_ids: set[str] | None = None
+        self.subset_by_dataset: dict[str, set[str]] | None = None
         self._read_only_snapshot()
 
     def _read_only_snapshot(self) -> None:
@@ -123,6 +124,12 @@ class Cohort:
         return tuple(sorted(self.memberships))
 
     @property
+    def processing_ids(self) -> tuple[str, ...]:
+        if self.active_patient_ids is None:
+            return self.all_ids
+        return tuple(sorted(self.active_patient_ids))
+
+    @property
     def real_ids(self) -> tuple[str, ...]:
         return tuple(sorted(patient_id for patient_id, splits in self.memberships.items() if any(x.startswith("real_") for x in splits)))
 
@@ -160,11 +167,6 @@ class Cohort:
             ],
         }
 
-    def write_snapshot(self, path: str | Path) -> None:
-        target = Path(path)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(self.snapshot(), ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
     def verify_unchanged(self) -> None:
         changed = []
         for name, initial in self.splits.items():
@@ -180,6 +182,9 @@ class Cohort:
 
     def expected_ids(self, split_name: str) -> tuple[str, ...]:
         try:
-            return self.splits[split_name].ids
+            ids = self.splits[split_name].ids
         except KeyError as exc:
             raise KeyError(f"Unknown split {split_name!r}; expected one of {SPLIT_FILES}") from exc
+        if self.active_patient_ids is None:
+            return ids
+        return tuple(patient_id for patient_id in ids if patient_id in self.active_patient_ids)

@@ -2,6 +2,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
+
 from lib.data.audit import EventJournal, update_processing_results, write_json
 from lib.data.generation import process_patient, load_selected_exams
 
@@ -16,7 +18,8 @@ class CohortStub:
         return ("patient", "matched")
 
 
-def test_failure_is_local_to_destination_and_cache_is_cleared(tmp_path, monkeypatch):
+@pytest.mark.parametrize("continue_on_error", [False, True])
+def test_failure_policy_and_cache_cleanup(tmp_path, monkeypatch, continue_on_error):
     cache = Mock()
     exams = {"ct": SimpleNamespace(cache=cache), "frontal": None, "lateral": None}
     monkeypatch.setattr("lib.data.generation.is_reusable_output", lambda *args: False)
@@ -28,14 +31,18 @@ def test_failure_is_local_to_destination_and_cache_is_cleared(tmp_path, monkeypa
             raise OSError("destination full")
     monkeypatch.setattr("lib.data.generation._write_destination", write)
     journal = EventJournal(tmp_path / "events.jsonl")
+    journal.continue_on_error = continue_on_error
     result = process_patient({"patient_id": "patient"}, CohortStub(), tmp_path, journal)
-    assert calls == ["real_train", "synthetic_train"]
+    assert calls == (["real_train"] if not continue_on_error else ["real_train", "synthetic_train"])
     assert result["real_train"]["status"] == "processing_failed"
-    assert result["synthetic_train"]["status"] == "processed"
+    assert result["synthetic_train"]["status"] == (
+        "not_attempted" if not continue_on_error else "processed"
+    )
     cache.clear.assert_called_once()
     events = journal.consolidate(tmp_path / "events.json")
     assert {(row["destination"], row["status"]) for row in events if row["status"] != "started"} == {
-        ("real_train", "processing_failed"), ("synthetic_train", "processed"),
+        ("real_train", "processing_failed"),
+        ("synthetic_train", "not_attempted" if not continue_on_error else "processed"),
     }
 
 

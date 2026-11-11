@@ -72,6 +72,28 @@ To preprocess the dataset, run
 python preprocess.py
 ```
 
+This runs inventory, selection, and generation in one invocation. The audit is written to `output/preprocess/GAN-dataset-complete/audit/exams.json` and `run.json`. By default, the first blocking error stops processing after saving the audit. Use `--continue-on-error` to attempt independent remaining cases; the command still exits with an error if any case failed.
+
+To run a deterministic subset while sampling independently from every dataset index, use `--subset` (3 patients per dataset) or `--subset X` (up to X unique patients per dataset):
+
+```bash
+python preprocess.py --subset --output-root output/preprocess/GAN-dataset-subset
+python preprocess.py --subset 5 --output-root output/preprocess/GAN-dataset-subset-5
+```
+
+The selection uses a fixed SHA-256 ranking and is recorded in `run.json`. It is generated in memory for that invocation; split files are not changed.
+Patients outside the sample are audited as out of scope without opening their DICOMs. Subset success only validates the sampled cohort, not the complete dataset; `run.json` identifies the execution scope explicitly.
+
+**Always give subset runs a separate `--output-root`.** The default `output/preprocess/GAN-dataset-complete` is reserved for a full run. A subset writes only its sampled patients, so using that default can leave it looking like the complete dataset. The tests in `tests/test_datasets.py` check every patient in the full splits and will fail against subset output. Run `python preprocess.py` to populate the complete output before running those tests.
+
+`--output-root` must be outside `--data-root`: the raw dataset is input only. If inventory is interrupted, `run.json` lists unverified patients separately from confirmed missing patients. Clinical export can read the consolidated report directly:
+
+```bash
+python paper-figure-scripts/export-clinical-audit.py \
+  --run output/preprocess/GAN-dataset-complete/audit/run.json \
+  --output-dir output/clinical-audit
+```
+
 This should create multiple h5 files located at `output/preprocess/GAN-dataset-complete`, following the structure `patient_id / ct_xray_data.h5`.
 
 #### 1.2. Dataset patching

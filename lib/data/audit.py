@@ -160,14 +160,80 @@ class DicomAudit:
         write_json(path, {"schema_version": AUDIT_SCHEMA_VERSION, "events": self.events})
 
 
-class EventJournal:
-    """Append-only JSONL journal for resumable, long-running patient processing."""
+def write_exam_rows(audit: DicomAudit, path: str | Path, run_id: str | None = None) -> None:
+    """Write one filterable record per indexed/discovered exam series."""
+    payload = audit.to_dict()
+    files_by_path = {row.get("path"): row for row in payload["files"]}
+    exams = []
+    represented = set()
+    for series in payload["series"]:
+        row = dict(series)
+        file_paths = row.get("file_paths", [])
+        row["files"] = [files_by_path[file_path] for file_path in file_paths if file_path in files_by_path]
+        represented.update(file_paths)
+        read_statuses = {item.get("read_status") for item in row["files"]}
+        row.setdefault("read_status", (
+            "read_failed" if "read_failed" in read_statuses else
+            "read_ok" if read_statuses and read_statuses == {"read_ok"} else
+            "indexed" if row["files"] else "not_read"
+        ))
+        if "expected_patient" not in row:
+            row["expected_patient"] = bool(row.get("patient_id"))
+        row["should_include"] = row.get("expected_patient") and row.get("eligibility_status") == "eligible"
+        errors = row.get("errors", []) or [error for item in row["files"] for error in item.get("errors", [])]
+        row["errors"] = errors
+        row["error_type"] = errors[0].get("exception_type") if errors else None
+        row["error_message"] = errors[0].get("message") if errors else row.get("reason")
+        row["final_status"] = _exam_final_status(row)
+        exams.append(row)
+    for file_row in payload["files"]:
+        if file_row.get("path") not in represented:
+            row = {**file_row, "files": [file_row]}
+            row["should_include"] = row.get("expected_patient") and row.get("eligibility_status") == "eligible"
+            errors = row.get("errors", [])
+            row["error_type"] = errors[0].get("exception_type") if errors else None
+            row["error_message"] = errors[0].get("message") if errors else row.get("selection_reason")
+            row["final_status"] = _exam_final_status(row)
+            exams.append(row)
+    for index, row in enumerate(exams):
+        row.update(schema_version=AUDIT_SCHEMA_VERSION, run_id=run_id, record_id=index + 1)
+        for field in ("path", "relative_path", "dataset", "patient_id", "patient_id_raw",
+                      "study_instance_uid", "series_instance_uid", "error_type", "error_message"):
+            row.setdefault(field, None)
+    write_json(path, sorted(exams, key=lambda row: (str(row.get("dataset", "")),
+                                                     str(row.get("path", "")),
+                                                     str(row.get("series_instance_uid", "")))))
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+
+def _exam_final_status(row: dict) -> str:
+    if (row.get("processing_status") == "processing_failed" or row.get("read_status") == "read_failed"
+            or any(item.get("read_status") == "read_failed" for item in row.get("files", []))
+            or row.get("eligibility_status") == "blocked" or row.get("errors")
+            or row.get("reason", "").endswith("_failed")):
+        return "failed"
+    if row.get("selection_status") == "selected":
+        status = row.get("processing_status")
+        if status in {"processed", "reused"}:
+            return "included"
+        if status in {"not_attempted", "partially_processed"}:
+            return status
+        return "selected"
+    if row.get("eligibility_status") == "ineligible" or row.get("selection_status") in {"skipped", "not_selected"}:
+        return "excluded"
+    if row.get("reason") == "outside_all_splits":
+        return "excluded"
+    return "not_evaluated"
+
+class EventJournal:
+    """Track processing events in memory or in a persistent JSONL journal."""
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        self.path = Path(path) if path is not None else None
+        if self.path is not None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self._attempts = {}
-        if self.path.exists():
+        self.events = []
+        if self.path is not None and self.path.exists():
             with self.path.open(encoding="utf-8") as stream:
                 for number, line in enumerate(stream, 1):
                     try:
@@ -192,21 +258,26 @@ class EventJournal:
             "attempt": 1,
             **event,
         }
-        payload = json.dumps(row, ensure_ascii=False, sort_keys=True, default=_json_default)
-        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
-            stream.write(payload + "\n")
-            stream.flush()
-            os.fsync(stream.fileno())
+        self.events.append(row)
+        if self.path is not None:
+            payload = json.dumps(row, ensure_ascii=False, sort_keys=True, default=_json_default)
+            with self.path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(payload + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
 
     def consolidate(self, output_path: str | Path) -> list[dict]:
         records = []
-        if self.path.exists():
+        if self.path is not None and self.path.exists():
             with self.path.open(encoding="utf-8") as stream:
                 for line_number, line in enumerate(stream, start=1):
                     try:
                         records.append(json.loads(line))
                     except json.JSONDecodeError as exc:
                         raise ValueError(f"Invalid event journal row {line_number}: {exc}") from exc
+        if self.path is None:
+            records.extend(self.events)
         records.sort(key=lambda row: (row.get("timestamp_utc", ""), row.get("patient_id", ""), row.get("destination", ""), row.get("attempt", 0)))
-        write_json(output_path, {"schema_version": AUDIT_SCHEMA_VERSION, "events": records})
+        if output_path is not None:
+            write_json(output_path, {"schema_version": AUDIT_SCHEMA_VERSION, "events": records})
         return records

@@ -1,16 +1,92 @@
 """Path-only inventory from the collection index; no DICOM files are opened here."""
 
 from collections import defaultdict
+import hashlib
+import io
 from pathlib import Path
 import csv
+
+SUBSET_SEED = 42
+SUBSET_ALGORITHM = "sha256-patient-ranking-v1"
+
+
+def _raise_unless_continuing(continue_on_error, message):
+    if not continue_on_error:
+        raise ValueError(message)
+
+
+def _record_subset_exclusion(cohort, dataset_name, context, audit):
+    selected = getattr(cohort, "subset_by_dataset", None)
+    if selected is None or context["patient_id"] in selected.get(dataset_name, set()):
+        return False
+    audit.add_series(**context, eligibility_status="not_evaluated",
+                     selection_status="not_evaluated", scope_status="not_selected_by_subset",
+                     reason="not_selected_by_subset", file_paths=[])
+    return True
+
+
+def _resolve_index_context(record, cohort, root, index_path, row_number):
+    patient_id, status = cohort.resolve_patient_id(record.get("Subject ID"))
+    location = str(record.get("File Location") or "").strip()
+    return patient_id, status, {
+        "patient_id": patient_id, "patient_id_raw": record.get("Subject ID"),
+        "identity_status": status,
+        "patient_id_candidate": str(record.get("Subject ID") or "").strip() or None,
+        "expected_patient": status == "matched", "dataset": root.name,
+        "memberships": list(cohort.memberships.get(patient_id, ())),
+        "study_instance_uid": str(record.get("Study UID") or "").strip() or None,
+        "series_instance_uid": str(record.get("Series UID") or "").strip() or None,
+        "modality": str(record.get("Modality") or "").strip().upper(),
+        "file_location": location, "file_count_indexed": record.get("Number of Images"),
+        "index_path": str(index_path), "index_row": row_number,
+        "relative_path": location, "path": str((root / location).resolve()),
+    }
+
+
+def select_subset_by_dataset(data_root, dataset_names, cohort, count, seed=SUBSET_SEED):
+    """Select up to count unique authorized patients per indexed dataset deterministically."""
+    selected_by_dataset, details, index_hashes = {}, [], {}
+    for dataset_name in sorted(dataset_names):
+        index_path = Path(data_root) / dataset_name / "metadata.csv"
+        raw = index_path.read_bytes()
+        index_hashes[dataset_name] = hashlib.sha256(raw).hexdigest()
+        reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig"), newline=""))
+        required = {"Subject ID", "File Location", "Modality", "Series UID", "Study UID"}
+        if not required.issubset(reader.fieldnames or []):
+            raise ValueError(f"Collection index {index_path} lacks columns: {sorted(required - set(reader.fieldnames or []))}")
+        available = sorted({
+            patient_id for record in reader
+            for patient_id, status in [cohort.resolve_patient_id(record.get("Subject ID"))]
+            if status == "matched"
+        })
+        ranked = sorted(
+            available,
+            key=lambda patient_id: (
+                hashlib.sha256(f"{SUBSET_ALGORITHM}\0{seed}\0{dataset_name}\0{patient_id}".encode("utf-8")).digest(),
+                patient_id,
+            ),
+        )
+        selected = tuple(sorted(ranked[:count]))
+        selected_by_dataset[dataset_name] = set(selected)
+        details.append({
+            "dataset": dataset_name,
+            "available_authorized_patients": len(available),
+            "selected_count": len(selected),
+            "selected_patient_ids": list(selected),
+        })
+    return selected_by_dataset, details, index_hashes
 
 
 def read_authorized_index(index_root, cohort, annotations, audit):
     """Resolve split membership and paths from the collection index before DICOM I/O."""
     root = Path(index_root).resolve()
+    continue_on_error = getattr(cohort, "continue_on_error", False)
     index_path = root / "metadata.csv"
     if not index_path.is_file():
         raise FileNotFoundError(f"Path-first inventory requires collection index {index_path}")
+    expected_hash = getattr(cohort, "subset_index_hashes", {}).get(root.name)
+    if expected_hash and hashlib.sha256(index_path.read_bytes()).hexdigest() != expected_hash:
+        raise ValueError(f"Collection index changed during subset selection: {index_path}")
     grouped = defaultdict(lambda: {"metadata": None, "directories": []})
     directory_owners = {}
     with index_path.open(encoding="utf-8-sig", newline="") as stream:
@@ -19,23 +95,26 @@ def read_authorized_index(index_root, cohort, annotations, audit):
         if not required.issubset(reader.fieldnames or []):
             raise ValueError(f"Collection index {index_path} lacks columns: {sorted(required - set(reader.fieldnames or []))}")
         for row_number, record in enumerate(reader, 2):
-            patient_id, status = cohort.resolve_patient_id(record.get("Subject ID"))
-            context = {
-                "patient_id": patient_id, "patient_id_raw": record.get("Subject ID"),
-                "memberships": list(cohort.memberships.get(patient_id, ())),
-                "study_instance_uid": str(record.get("Study UID") or "").strip() or None,
-                "series_instance_uid": str(record.get("Series UID") or "").strip() or None,
-                "modality": str(record.get("Modality") or "").strip().upper(),
-                "file_location": str(record.get("File Location") or "").strip(),
-                "file_count_indexed": record.get("Number of Images"),
-                "index_path": str(index_path), "index_row": row_number,
-            }
+            patient_id, status, context = _resolve_index_context(
+                record, cohort, root, index_path, row_number)
+            if _record_subset_exclusion(cohort, root.name, context, audit):
+                continue
             if status != "matched":
-                audit.add_series(**context, eligibility_status="skipped", selection_status="skipped", reason=status)
+                series_row = audit.add_series(**context, eligibility_status="skipped", selection_status="skipped", reason=status)
+                series_row["file_paths"] = []
+                if status == "patient_id_unresolved":
+                    raise ValueError(f"Unresolved patient identity at {index_path}:{row_number}")
+                _raise_unless_continuing(
+                    continue_on_error,
+                    f"Patient {status}: {context['patient_id_raw']!r} at {index_path}:{row_number}",
+                )
                 continue
             annotation = annotations.get(patient_id)
             if patient_id in annotations and annotation != "selected":
                 audit.add_series(**context, eligibility_status="blocked", reason="patient_selection_annotation_conflict")
+                _raise_unless_continuing(
+                    continue_on_error, f"Patient selection annotation conflicts for {patient_id}"
+                )
                 continue
             modality = context["modality"]
             if modality not in {"CT", "CR", "DX"}:
@@ -53,11 +132,16 @@ def read_authorized_index(index_root, cohort, annotations, audit):
             candidate = (root / location).resolve()
             if not location or not candidate.is_relative_to(root) or not candidate.is_dir():
                 audit.add_series(**context, eligibility_status="blocked", reason="indexed_path_missing_or_outside_root")
+                _raise_unless_continuing(
+                    continue_on_error,
+                    f"Indexed series path is missing or outside dataset root: {location!r}",
+                )
                 continue
             series_uid = context["series_instance_uid"]
             study_uid = context["study_instance_uid"]
             group_key = (patient_id, study_uid, series_uid or str(candidate), modality)
             if candidate in directory_owners and directory_owners[candidate] != group_key:
+                audit.add_series(**context, eligibility_status="blocked", reason="conflicting_series_directory_owner")
                 raise ValueError(f"Conflicting collection index rows for the same series directory: {candidate}")
             directory_owners[candidate] = group_key
             group = grouped[group_key]
@@ -96,6 +180,7 @@ def _enumerate_indexed_series(group, root, audit):
     for path in sorted(paths):
         rows.append(audit.add_file(
             path=str(path), relative_path=str(path.relative_to(root)),
+            dataset=root.name, expected_patient=True,
             patient_id=metadata["patient_id"], patient_id_raw=metadata["patient_id_raw"],
             patient_id_source="metadata.csv:Subject ID",
             memberships=metadata["memberships"], in_any_split=True,
@@ -123,6 +208,7 @@ def record_directory_result(audit, rows, directory_path, patient_id, *, director
                                   "exception_type": type(error).__name__, "message": str(error)})
     audit.add_series(
         path=str(directory_path), patient_id=patient_id,
+        expected_patient=bool(patient_id), dataset=rows[0].get("dataset") if rows else None,
         file_paths=[row["path"] for row in rows], file_count=len(rows),
         series_instance_uid=next((row.get("series_instance_uid") for row in rows), None),
         study_instance_uid=next((row.get("study_instance_uid") for row in rows), None),

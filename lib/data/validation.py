@@ -27,16 +27,20 @@ def validate_split_outputs(
         root = Path(output_roots[split_name])
         expected_order = cohort.expected_ids(split_name)
         expected = set(expected_order)
+        authorized = set(cohort.splits[split_name].ids)
         paths = sorted(root.rglob(filename)) if root.exists() else []
         by_id: dict[str, list[str]] = {}
         for path in paths:
             patient_id = path.parent.name
             by_id.setdefault(patient_id, []).append(str(path))
         written = set(by_id)
-        duplicates = {key: values for key, values in sorted(by_id.items()) if len(values) > 1}
+        duplicates_all = {key: values for key, values in sorted(by_id.items()) if len(values) > 1}
+        out_of_scope = sorted((written & authorized) - expected)
+        duplicates = {key: values for key, values in duplicates_all.items() if key not in out_of_scope}
+        out_of_scope_duplicates = {key: values for key, values in duplicates_all.items() if key in out_of_scope}
         invalid = []
-        for patient_id, patient_paths in by_id.items():
-            for path in patient_paths:
+        for patient_id in sorted(written - set(out_of_scope)):
+            for path in by_id[patient_id]:
                 try:
                     _validate_output(path, patient_id, split_name)
                 except (OSError, ValueError, KeyError, TypeError) as exc:
@@ -48,10 +52,12 @@ def validate_split_outputs(
             "expected_ids": list(expected_order),
             "written_ids": sorted(written),
             "missing_ids": sorted(expected - written),
-            "unexpected_ids": sorted(written - expected),
+            "unexpected_ids": sorted(written - authorized),
+            "out_of_scope_ids": out_of_scope,
             "duplicate_outputs": duplicates,
+            "out_of_scope_duplicate_outputs": out_of_scope_duplicates,
             "invalid_outputs": invalid,
-            "success": expected == written and not duplicates and not invalid,
+            "success": expected <= written and not duplicates and not invalid and not (written - authorized),
         }
         report["success"] = report["success"] and row["success"]
         report["splits"].append(row)

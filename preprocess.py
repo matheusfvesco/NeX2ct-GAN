@@ -6,14 +6,17 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
+from datetime import datetime, timezone
+from uuid import uuid4
 
-from lib.data.audit import DicomAudit, EventJournal, update_processing_results, write_json
+from lib.data.audit import DicomAudit, EventJournal, write_exam_rows, write_json
 from lib.data.cohort import Cohort
 from lib.data.dicom import DicomDataset
 from lib.data.selection import select_exams, selected_intervals
 from lib.data.respiratory import audit_selected_exams
 from lib.data.validation import validate_split_outputs
 from lib.data.generation import PROCESSING_CONTRACT_VERSION, destination_root, process_patient
+from lib.data.inventory import SUBSET_ALGORITHM, SUBSET_SEED, select_subset_by_dataset
 from lib.dicom import DicomFile
 from lib.logging import setup_logger
 from lib.utils.dicom import XRayJsonClassifier
@@ -123,6 +126,8 @@ def _patient_candidates(patient_data: dict, audit: DicomAudit) -> tuple[list, li
                                eligibility_reason="view_classification_failed", selection_reason="view_classification_failed")
                     row["errors"].append({"stage": "view_classification", "code": "view_classification_failed",
                                           "exception_type": type(exc).__name__, "message": str(exc)})
+                if not getattr(audit, "continue_on_error", False):
+                    raise
     return cts, views["frontal"], views["lateral"]
 
 
@@ -157,20 +162,88 @@ def _discover_datasets(data_root: Path, dataset_names: list[str] | None) -> list
     return sorted(path.name for path in data_root.iterdir() if path.is_dir())
 
 
-def prepare(args) -> dict:
+def _ensure_subset(data_root: Path, datasets: list[str] | None, cohort: Cohort, count: int | None) -> dict | None:
+    if count is None:
+        return None
+    datasets = datasets if datasets is not None else _discover_datasets(data_root, None)
+    if cohort.subset_by_dataset is None:
+        selected, details, index_hashes = select_subset_by_dataset(data_root, datasets, cohort, count)
+        cohort.subset_by_dataset = selected
+        cohort.subset_index_hashes = index_hashes
+        cohort.subset_details = details
+    else:
+        selected = cohort.subset_by_dataset
+        details = cohort.subset_details
+        index_hashes = cohort.subset_index_hashes
+    cohort.active_patient_ids = set().union(*selected.values()) if selected else set()
+    return {
+        "count_per_dataset": count,
+        "seed": SUBSET_SEED,
+        "algorithm": SUBSET_ALGORITHM,
+        "datasets": details,
+        "selected_by_dataset": {name: sorted(ids) for name, ids in selected.items()},
+        "active_patient_ids": sorted(cohort.active_patient_ids),
+        "metadata_index_sha256": index_hashes,
+    }
+
+
+def _ensure_patient_selection(entry, memberships, continue_on_error):
+    if continue_on_error:
+        return
+    roles = ("ct", "frontal", "lateral") if any(
+        name.startswith("real_") for name in memberships
+    ) else ("ct",)
+    missing = [role for role in roles if not entry.get("selected", {}).get(role)]
+    if missing or entry["annotation_conflict"]:
+        raise ValueError(f"Patient {entry['patient_id']}: missing required exams {missing}; "
+                         f"annotation_conflict={entry['annotation_conflict']}")
+
+
+def _persist_audits(audit: DicomAudit, report: dict, audit_dir: Path) -> None:
+    payload = audit.to_dict()
+    write_exam_rows(audit, audit_dir / "exams.json", report.get("run_id"))
+    now = datetime.now(timezone.utc).isoformat()
+    report["updated_at_utc"] = now
+    if report.get("status") != "running":
+        report["finished_at_utc"] = now
+    report.update(series=payload["series"], patients=payload["patients"])
+    selection = report.get("selection", {})
+    expected = {row["patient_id"] for row in selection.get("patients", [])}
+    if not expected:
+        subset = report.get("subset")
+        if subset is not None:
+            expected = set(subset.get("active_patient_ids", []))
+        else:
+            expected = {row["patient_id"] for row in report.get("cohort_snapshot", {}).get("memberships", [])}
+    found = {row.get("patient_id") for row in payload["series"] if row.get("patient_id")}
+    found.update(row.get("patient_id") for row in payload["files"] if row.get("patient_id"))
+    extras = sorted({row.get("patient_id_raw") for row in payload["series"]
+                     if row.get("reason") == "outside_all_splits" and row.get("patient_id_raw")})
+    report["patient_coverage"] = {
+        "expected_ids": sorted(expected), "found_expected_ids": sorted(expected & found),
+        "missing_ids": sorted(expected - found) if report.get("inventory_complete") else [],
+        "not_yet_verified_ids": sorted(expected - found) if not report.get("inventory_complete") else [],
+        "unexpected_ids": extras,
+    }
+    write_json(audit_dir / "run.json", report)
+
+
+def prepare(args, audit: DicomAudit | None = None, cohort: Cohort | None = None) -> dict:
     data_root = Path(args.data_root).resolve()
     output_root = Path(args.output_root).resolve()
-    cohort = Cohort(Path(args.splits_dir).resolve())
-    run_dir = output_root
-    audit_dir = run_dir / "audit"
-    audit_dir.mkdir(parents=True, exist_ok=True)
-    cohort.write_snapshot(audit_dir / "cohort_snapshot.json")
-
-    audit = DicomAudit()
+    cohort = cohort or Cohort(Path(args.splits_dir).resolve())
+    cohort.continue_on_error = getattr(args, "continue_on_error", False)
+    audit = audit or DicomAudit()
+    audit.continue_on_error = cohort.continue_on_error
     logger = setup_logger("preprocess-prepare", experiment_name="prepare", filename_comment="prepare")
     datasets = _discover_datasets(data_root, args.dataset)
     if not datasets:
         raise ValueError(f"No dataset directories found under {data_root}")
+    subset_report = _ensure_subset(data_root, datasets, cohort, getattr(args, "subset", None))
+    empty_subset_datasets = [row["dataset"] for row in (subset_report or {}).get("datasets", [])
+                             if row["selected_count"] == 0]
+    if empty_subset_datasets and not cohort.continue_on_error:
+        raise ValueError(f"No authorized patients available for subset in dataset(s): {empty_subset_datasets}")
     annotation_path = data_root / "patient-selection-annotation.json"
     with annotation_path.open(encoding="utf-8") as stream:
         annotations = json.load(stream)
@@ -179,18 +252,15 @@ def prepare(args) -> dict:
     classifier = XRayJsonClassifier(root_data=data_root)
     classifier.load_json(root_data=data_root)
     dataset = DicomDataset(data_root, accepted_datasets=datasets, logger=logger, cohort=cohort, audit=audit)
+    dataset.continue_on_error = cohort.continue_on_error
     dataset.patient_selection_annotations = annotations
     dataset.load()
-    # Preserve the existing inexpensive per-patient availability reports.
-    if dataset.dataset:
-        dataset.write_summary(output_root / "raw_data_summary.csv")
-        dataset.write_counts(output_root / "modality_counts.csv")
 
     files_by_patient = {}
     for row in audit.files:
         files_by_patient.setdefault(row.get("patient_id"), []).append(row)
     patients = []
-    for patient_id in cohort.all_ids:
+    for patient_id in cohort.processing_ids:
         membership = list(cohort.memberships[patient_id])
         entry = {
             "patient_id": patient_id,
@@ -198,6 +268,8 @@ def prepare(args) -> dict:
             "destinations": list(cohort.destinations(patient_id)),
             "status": "no_valid_candidates",
             "selection_by_destination": {},
+            "destination_status": {destination: "not_attempted" for destination in cohort.destinations(patient_id)},
+            "processing_status": "not_attempted",
             "annotation": annotations.get(patient_id),
             "annotation_conflict": patient_id in annotations and annotations[patient_id] != "selected",
         }
@@ -270,10 +342,19 @@ def prepare(args) -> dict:
             }
         patients.append(entry)
         audit.add_patient(**{key: value for key, value in entry.items() if key != "candidates" and key != "selected"})
+        _ensure_patient_selection(entry, membership, cohort.continue_on_error)
 
     cohort.verify_unchanged()
-    audit.write(audit_dir / "dicom_audit.json")
     blockers = []
+    blockers.extend({"reason": "no_authorized_patients_in_subset_dataset", "dataset": dataset_name}
+                    for dataset_name in empty_subset_datasets)
+    for row in audit.files:
+        if row.get("errors"):
+            blockers.append({"patient_id": row.get("patient_id"), "reason": "dicom_read_or_classification_failed",
+                             "path": row.get("path"), "errors": row["errors"]})
+    for row in audit.series:
+        if row.get("errors") or row.get("reason") in {"outside_all_splits", "patient_id_unresolved", "patient_selection_annotation_conflict", "indexed_path_missing_or_outside_root", "directory_classification_failed"}:
+            blockers.append({"patient_id": row.get("patient_id"), "reason": row.get("reason"), "path": row.get("file_location") or row.get("path")})
     for entry in patients:
         if not entry.get("selected", {}).get("ct"):
             blockers.append({"patient_id": entry["patient_id"], "reason": "no_valid_ct_candidate"})
@@ -294,27 +375,137 @@ def prepare(args) -> dict:
         "ready_for_generate": not blockers,
         "prepare_blockers": blockers,
         "patients": patients,
+        "subset": subset_report,
+        "active_patient_ids": list(cohort.processing_ids),
+        "subset_index_sha256": getattr(cohort, "subset_index_hashes", {}),
     }
-    write_json(run_dir / "selection_manifest.json", manifest)
     return manifest
 
 
-def generate(args) -> None:
-    manifest_path = Path(args.manifest)
-    with manifest_path.open(encoding="utf-8") as stream:
-        manifest = json.load(stream)
+def _process_cohort(cohort, entries, output_root, logger, continue_on_error, blockers, checkpoint):
+    failures = list(blockers) if continue_on_error else []
+    patient_results = {}
+    journal = EventJournal()
+    journal.continue_on_error = continue_on_error
+    for patient_id in cohort.processing_ids:
+        cohort.verify_unchanged()
+        blocked = any(item.get("patient_id") == patient_id for item in blockers)
+        if blocked:
+            patient_results[patient_id] = {
+                destination: {"status": "not_attempted", "reason": "selection_blocked"}
+                for destination in cohort.destinations(patient_id)
+            }
+            continue
+        results = process_patient(entries[patient_id], cohort, output_root, journal, logger)
+        patient_results[patient_id] = results
+        failures.extend({"patient_id": patient_id, "destination": destination, **result["error"]}
+                        for destination, result in results.items() if result["status"] == "processing_failed")
+        checkpoint(patient_results, failures, journal.events)
+        if failures and not continue_on_error:
+            break
+    return patient_results, failures, journal.consolidate(None)
+
+
+def _record_file_results(audit, patient_results):
+    for row in audit.files:
+        if row.get("selection_status") != "selected":
+            continue
+        results = patient_results.get(row.get("patient_id"), {})
+        row["destination_results"] = results
+        row["processing_status"] = _destination_status(results)
+
+
+def _destination_status(results):
+    statuses = {item["status"] for item in results.values()}
+    if not statuses or statuses == {"not_attempted"}:
+        return "not_attempted"
+    if statuses == {"reused"}:
+        return "reused"
+    if statuses <= {"processed", "reused"}:
+        return "processed"
+    if statuses & {"processed", "reused"}:
+        return "partially_processed"
+    return "processing_failed"
+
+
+def _record_series_results(audit, patient_results):
+    selected_paths = {row["path"] for row in audit.files if row.get("selection_status") == "selected"}
+    for row in audit.series:
+        if not selected_paths.intersection(row.get("file_paths", [])):
+            row["processing_status"] = "not_applicable"
+            if row.get("eligibility_status") == "eligible":
+                row.update(selection_status="not_selected", reason="eligible_candidate_not_chosen")
+            continue
+        row["selection_status"] = "selected"
+        results = patient_results.get(row.get("patient_id"))
+        row["processing_status"] = _destination_status(results or {})
+        if results is not None:
+            row["destination_results"] = results
+
+
+def _record_patient_results(audit, patient_results):
+    for row in audit.patients:
+        patient_id = row["patient_id"]
+        results = patient_results.get(patient_id, {})
+        row["destination_results"] = results
+        row["destination_status"] = {
+            destination: results.get(destination, {}).get("status", "not_attempted")
+            for destination in row.get("destinations", [])
+        }
+        row["processing_status"] = _destination_status(results)
+
+
+def _record_processing_results(audit, patient_results):
+    _record_file_results(audit, patient_results)
+    _record_series_results(audit, patient_results)
+    _record_patient_results(audit, patient_results)
+
+
+def _split_integrity(cohort, manifest):
+    try:
+        cohort.verify_unchanged()
+        final_hashes = {name: hashlib.sha256((cohort.splits_dir / name).read_bytes()).hexdigest() for name in cohort.splits}
+        return {"split_hashes_unchanged": True,
+                "initial_split_hashes": manifest["split_hashes"], "final_split_hashes": final_hashes}, []
+    except Exception as exc:
+        result = {"split_hashes_unchanged": False,
+                  "initial_split_hashes": manifest.get("split_hashes", {}),
+                  "split_integrity_error": {"type": type(exc).__name__, "message": str(exc)}}
+        return result, [{"reason": "protected_split_changed_during_generation", **result}]
+
+
+def _restore_subset_scope(cohort, manifest):
+    subset = manifest.get("subset")
+    if subset is None:
+        return
+    cohort.active_patient_ids = set(manifest["active_patient_ids"])
+    cohort.subset_by_dataset = {
+        name: set(patient_ids) for name, patient_ids in subset["selected_by_dataset"].items()
+    }
+    selected_union = set().union(*cohort.subset_by_dataset.values()) if cohort.subset_by_dataset else set()
+    if selected_union != cohort.active_patient_ids or not selected_union <= set(cohort.all_ids):
+        raise ValueError("Subset scope differs from selected authorized patients")
+    cohort.subset_index_hashes = manifest.get("subset_index_sha256", {})
+    for dataset_name, expected_hash in cohort.subset_index_hashes.items():
+        index_path = Path(manifest["data_root"]) / dataset_name / "metadata.csv"
+        if hashlib.sha256(index_path.read_bytes()).hexdigest() != expected_hash:
+            raise ValueError(f"Collection index changed after subset selection: {index_path}")
+
+
+def generate(args, manifest: dict, audit: DicomAudit, run_report: dict) -> None:
     if manifest.get("processing_contract_version") != PROCESSING_CONTRACT_VERSION:
         raise ValueError("Manifest uses an older processing contract; prepare must be repeated before generation")
-    if not args.approve_manifest:
-        raise ValueError("Generation requires --approve-manifest after reviewing the prepared selection manifest")
-    if not manifest.get("ready_for_generate"):
+    continue_on_error = getattr(args, "continue_on_error", False)
+    if not manifest.get("ready_for_generate") and not continue_on_error:
         raise ValueError(f"Manifest is not ready for generation: {manifest.get('prepare_blockers', [])}")
     cohort = Cohort(manifest["splits_dir"])
+    cohort.continue_on_error = continue_on_error
+    _restore_subset_scope(cohort, manifest)
     current_hashes = {name: cohort.splits[name].sha256 for name in cohort.splits}
     if current_hashes != manifest.get("split_hashes"):
         raise ValueError("Split files differ from the hashes captured during prepare; generation blocked")
     entries = {item["patient_id"]: item for item in manifest["patients"]}
-    if len(entries) != len(manifest["patients"]) or set(entries) != set(cohort.all_ids):
+    if len(entries) != len(manifest["patients"]) or set(entries) != set(cohort.processing_ids):
         raise ValueError("Selection manifest does not contain exactly the authorized cohort")
     for patient_id, entry in entries.items():
         if entry.get("memberships") != list(cohort.memberships[patient_id]):
@@ -324,33 +515,29 @@ def generate(args) -> None:
 
     output_root = Path(manifest["output_root"])
     logger = setup_logger("preprocess-generate", experiment_name="generate", filename_comment="generate")
-    failures = []
-    patient_results = {}
-    journal = EventJournal(output_root / "audit" / "processing_events.jsonl")
-    for patient_id in cohort.all_ids:
-        entry = entries[patient_id]
-        results = process_patient(entry, cohort, output_root, journal, logger)
-        patient_results[patient_id] = results
-        failures.extend({"patient_id": patient_id, "destination": destination, **result["error"]}
-                        for destination, result in results.items() if result["status"] == "processing_failed")
-    try:
-        cohort.verify_unchanged()
-        final_hashes = {name: hashlib.sha256((cohort.splits_dir / name).read_bytes()).hexdigest() for name in cohort.splits}
-        split_integrity = {
-            "split_hashes_unchanged": True,
-            "initial_split_hashes": manifest["split_hashes"],
-            "final_split_hashes": final_hashes,
-        }
-    except Exception as exc:
-        split_integrity = {
-            "split_hashes_unchanged": False,
-            "initial_split_hashes": manifest.get("split_hashes", {}),
-            "split_integrity_error": {"type": type(exc).__name__, "message": str(exc)},
-        }
-        failures.append({"reason": "protected_split_changed_during_generation", **split_integrity})
-    audit_path = output_root / "audit" / "dicom_audit.json"
-    update_processing_results(audit_path, patient_results, cohort)
-    journal.consolidate(output_root / "audit" / "processing_events.json")
+    preexisting = validate_split_outputs(
+        cohort, {name: destination_root(output_root, name.removesuffix(".txt")) for name in cohort.splits})
+    run_report["preexisting_outputs"] = preexisting
+    output_failures = [
+        {"reason": "invalid_preexisting_outputs", "split": row["split"],
+         "unexpected_ids": row["unexpected_ids"], "duplicate_outputs": row["duplicate_outputs"]}
+        for row in preexisting["splits"] if row["unexpected_ids"] or row["duplicate_outputs"]
+    ]
+    if output_failures and not continue_on_error:
+        raise ValueError(f"Unexpected or duplicate preexisting outputs: {output_failures}")
+    def checkpoint(results, failures, events):
+        run_report.update(patient_results=results, processing_failures=failures, events=list(events))
+        _record_processing_results(audit, results)
+        _persist_audits(audit, run_report, output_root / "audit")
+
+    patient_results, failures, events = _process_cohort(
+        cohort, entries, output_root, logger, continue_on_error, manifest.get("prepare_blockers", []), checkpoint)
+    failures.extend(output_failures)
+    run_report.update(events=events, patient_results=patient_results,
+                      processing_failures=failures)
+    split_integrity, split_failures = _split_integrity(cohort, manifest)
+    failures.extend(split_failures)
+    _record_processing_results(audit, patient_results)
     coverage = validate_split_outputs(
         cohort,
         {split_name: destination_root(output_root, split_name.removesuffix(".txt")) for split_name in cohort.splits},
@@ -360,29 +547,79 @@ def generate(args) -> None:
     if not coverage["success"]:
         failures.append({"reason": "expected_written_coverage_mismatch", "coverage": coverage})
     coverage["processing_failures"] = [failure for failure in failures if failure.get("reason") != "expected_written_coverage_mismatch"]
-    write_json(output_root / "audit" / "completion_report.json", coverage)
+    run_report.update(status="failed" if failures or not coverage["success"] else "succeeded",
+                      completion=coverage, processing_failures=failures)
     if failures:
-        raise RuntimeError(f"Generation incomplete for {len(failures)} patient(s); see audit/processing_events.json")
+        raise RuntimeError(f"Generation incomplete for {len(failures)} patient(s); see audit/run.json")
+
+
+def positive_int(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("--subset requires a positive integer") from exc
+    if number <= 0:
+        raise argparse.ArgumentTypeError("--subset requires a positive integer")
+    return number
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--stage", choices=("prepare", "generate"), required=True)
     parser.add_argument("--data-root", type=Path, default=Path("data"))
     parser.add_argument("--splits-dir", type=Path, default=Path("splits"))
     parser.add_argument("--output-root", type=Path, default=Path("output/preprocess/GAN-dataset-complete"))
-    parser.add_argument("--manifest", type=Path)
-    parser.add_argument("--approve-manifest", action="store_true", help="Confirm manual review of the complete prepare manifest before pixel/DRR processing")
     parser.add_argument("--dataset", action="append", help="Dataset directory under data-root; repeatable")
     parser.add_argument("--ct-selection", choices=("temporal", "largest_valid"))
+    parser.add_argument("--continue-on-error", action="store_true", help="Continue independent inventory/processing after recoverable errors; exit nonzero if any error occurred")
+    parser.add_argument("--subset", nargs="?", const=3, default=None, type=positive_int, metavar="X",
+                        help="Select up to X patients per dataset deterministically (default X=3)")
     args = parser.parse_args(argv)
-    if args.stage == "prepare":
-        prepare(args)
-    else:
-        if args.manifest is None:
-            parser.error("--manifest is required for --stage generate")
-        generate(args)
-    return 0
+    output_root = Path(args.output_root).resolve()
+    data_root = Path(args.data_root).resolve()
+    if output_root == data_root or output_root.is_relative_to(data_root):
+        parser.error("--output-root must be outside --data-root; raw input is read-only")
+    audit_dir = output_root / "audit"
+    audit_dir.mkdir(parents=True, exist_ok=True)
+    audit = DicomAudit()
+    run_report = {
+        "schema_version": 1, "run_id": uuid4().hex,
+        "started_at_utc": datetime.now(timezone.utc).isoformat(), "status": "running",
+        "stage": "split_validation", "inventory_complete": False,
+        "continue_on_error": args.continue_on_error,
+        "configuration": {"data_root": str(Path(args.data_root).resolve()),
+                           "splits_dir": str(Path(args.splits_dir).resolve()),
+                           "output_root": str(output_root), "datasets": args.dataset,
+                           "ct_selection": args.ct_selection or "temporal"},
+    }
+
+    try:
+        cohort = Cohort(Path(args.splits_dir).resolve())
+        cohort.continue_on_error = args.continue_on_error
+        run_report["cohort_snapshot"] = cohort.snapshot()
+        run_report["subset"] = _ensure_subset(
+            data_root, None if args.dataset is None else _discover_datasets(data_root, args.dataset),
+            cohort, args.subset)
+        run_report["execution_scope"] = "subset" if args.subset is not None else "full"
+        _persist_audits(audit, run_report, audit_dir)
+        run_report["stage"] = "inventory"
+        manifest = prepare(args, audit, cohort)
+        run_report["selection"] = manifest
+        run_report["inventory_complete"] = True
+        run_report["stage"] = "generation"
+        _persist_audits(audit, run_report, audit_dir)
+        generate(args, manifest, audit, run_report)
+        run_report.update(status="succeeded", stage="complete", exit_code=0)
+        _persist_audits(audit, run_report, audit_dir)
+        return 0
+    except (Exception, KeyboardInterrupt) as exc:
+        run_report.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                          exit_code=130 if isinstance(exc, KeyboardInterrupt) else 1,
+                          fatal_error={"type": type(exc).__name__, "message": str(exc)})
+        try:
+            _persist_audits(audit, run_report, audit_dir)
+        except Exception as audit_exc:
+            parser.exit(1, f"Audit persistence failed: {type(audit_exc).__name__}: {audit_exc}\n")
+        parser.exit(run_report["exit_code"], f"{type(exc).__name__}: {exc}\nAudit: {audit_dir / 'run.json'}\n")
 
 
 if __name__ == "__main__":

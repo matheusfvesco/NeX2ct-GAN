@@ -153,6 +153,8 @@ class DicomDataset:
         except Exception as exc:
             self.logger.warning("Error classifying series for '%s': %s", patient_id, exc)
             record_directory_result(self.audit, rows, paths[0].parent, patient_id, error=exc)
+            if not getattr(self, "continue_on_error", False):
+                raise
 
     def filter_dataset(self, allowed_patient_ids=None):
         """
