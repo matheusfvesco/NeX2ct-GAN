@@ -123,8 +123,8 @@ def test_subset_cli_accepts_bare_or_positive_count_and_caps_per_dataset(tmp_path
         dataset_root = data_root / "dataset-a"
         dataset_root.mkdir(parents=True)
         (dataset_root / "metadata.csv").write_text(
-            "Series UID,Subject ID,Study UID,Modality,File Location\n" +
-            "".join(f"s-{index},p{index},study,CT,./missing-{index}\n" for index in range(5)),
+            "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n" +
+            "".join(f"s-{index},collection-a,p{index},study,CT,./missing-{index}\n" for index in range(5)),
             encoding="utf-8",
         )
         cohort = write_splits(tmp_path / f"splits-{expected_count}", {
@@ -176,8 +176,8 @@ def test_generate_restores_subset_instead_of_requiring_the_full_cohort(tmp_path,
     source = data_root / "source"
     source.mkdir(parents=True)
     (source / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,File Location\n"
-        "one,a,study,CT,./missing\ntwo,b,study,CT,./missing\nthree,c,study,CT,./missing\n",
+        "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n"
+        "one,source,a,study,CT,./missing\ntwo,source,b,study,CT,./missing\nthree,source,c,study,CT,./missing\n",
         encoding="utf-8")
     subset = preprocess._ensure_subset(data_root, ["source"], cohort, 1)
     chosen = cohort.processing_ids[0]

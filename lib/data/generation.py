@@ -6,7 +6,7 @@ from lib.dicom import CTScanDirectory, DicomFile, GenericDicomDirectory
 from lib.io import HDF5FileHandler, PatientDataStorer
 
 
-PROCESSING_CONTRACT_VERSION = 2
+PROCESSING_CONTRACT_VERSION = 3
 
 
 def load_selected_exams(entry, cohort):

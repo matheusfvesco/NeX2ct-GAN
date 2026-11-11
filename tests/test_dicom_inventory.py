@@ -20,10 +20,10 @@ def test_index_groups_series_from_multiple_paths_without_reading_headers(tmp_pat
         (root / name).mkdir(parents=True)
         (root / name / "slice.dcm").write_bytes(b"fixture placeholder")
     (root / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
-        "series-a,included,study,CT,1,./one\n"
-        "series-a,included,study,CT,1,./two\n"
-        "series-x,included,study,CT,1,./excluded\n", encoding="utf-8"
+        "Series UID,Collection,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        "series-a,LIDC-IDRI,included,study,CT,1,./one\n"
+        "series-a,LIDC-IDRI,included,study,CT,1,./two\n"
+        "series-x,LIDC-IDRI,included,study,CT,1,./excluded\n", encoding="utf-8"
     )
     audit = DicomAudit()
     result = list(read_authorized_index(root, CohortStub(), {"included": "selected"}, audit))
@@ -33,6 +33,8 @@ def test_index_groups_series_from_multiple_paths_without_reading_headers(tmp_pat
     assert len(by_uid["series-x"]["paths"]) == 1
     assert {row["series_instance_uid"] for row in audit.files} == {"series-a", "series-x"}
     assert by_uid["series-a"]["metadata"]["number_of_images_indexed"] == 2
+    assert by_uid["series-a"]["metadata"]["dataset"] == "LIDC-IDRI"
+    assert all(row["dataset"] == "LIDC-IDRI" for row in audit.files)
 
 
 def test_unexpected_patient_is_audited_then_stops_by_default(tmp_path):
@@ -40,8 +42,8 @@ def test_unexpected_patient_is_audited_then_stops_by_default(tmp_path):
     root.mkdir()
     index = root / "metadata.csv"
     index.write_text(
-        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
-        "series-extra,external,study,CT,1,./extra\n", encoding="utf-8"
+        "Series UID,Collection,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        "series-extra,source,external,study,CT,1,./extra\n", encoding="utf-8"
     )
     audit = DicomAudit()
     with pytest.raises(ValueError, match="outside_all_splits"):
@@ -68,8 +70,8 @@ def test_subset_sampling_is_deterministic_stratified_and_counts_unique_patients(
         root.mkdir()
         rows = records[root.name]
         (root / "metadata.csv").write_text(
-            "Series UID,Subject ID,Study UID,Modality,File Location\n" +
-            "".join(f"series-{index},{patient_id},study,CT,./missing-{index}\n"
+            "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n" +
+            "".join(f"series-{index},collection-{root.name},{patient_id},study,CT,./missing-{index}\n"
                     for index, patient_id in enumerate(rows + rows[:1])),
             encoding="utf-8",
         )
@@ -78,17 +80,42 @@ def test_subset_sampling_is_deterministic_stratified_and_counts_unique_patients(
     for root in roots:
         rows = records[root.name][::-1]
         (root / "metadata.csv").write_text(
-            "Series UID,Subject ID,Study UID,Modality,File Location\n" +
-            "".join(f"series-{index},{patient_id},study,CT,./missing-{index}\n"
+            "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n" +
+            "".join(f"series-{index},collection-{root.name},{patient_id},study,CT,./missing-{index}\n"
                     for index, patient_id in enumerate(rows + rows[:1])),
             encoding="utf-8",
         )
     second = select_subset_by_dataset(tmp_path, list(reversed(records)), cohort, 3)
     assert first[0] == second[0]
-    assert [len(first[0][name]) for name in sorted(records)] == [3, 3, 2]
+    assert [len(first[0][f"collection-{name}"]) for name in sorted(records)] == [3, 3, 2]
     assert all(len(set(ids)) == len(ids) for ids in first[0].values())
     assert first[1][0]["selected_patient_ids"] == sorted(first[1][0]["selected_patient_ids"])
     assert first[1][2]["selected_count"] == 2
+
+
+def test_subset_groups_collections_inside_a_merged_dataset_folder(tmp_path):
+    splits_dir = tmp_path / "splits"
+    splits_dir.mkdir()
+    for name in SPLIT_FILES:
+        ids = [f"p{i}" for i in range(6)] if name == "synthetic_train.txt" else []
+        (splits_dir / name).write_text("".join(f"{patient_id}\n" for patient_id in ids), encoding="utf-8")
+    cohort = Cohort(splits_dir)
+    root = tmp_path / "gan_dataset"
+    root.mkdir()
+    (root / "metadata.csv").write_text(
+        "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n"
+        "s0,LIDC-IDRI,p0,study,CT,./s0\n"
+        "s1,LIDC-IDRI,p1,study,CT,./s1\n"
+        "s2,LIDC-IDRI,p2,study,CT,./s2\n"
+        "s3,4D-Lung,p3,study,CT,./s3\n"
+        "s4,4D-Lung,p4,study,CT,./s4\n"
+        "s5,4D-Lung,p5,study,CT,./s5\n", encoding="utf-8")
+
+    selected, details, _ = select_subset_by_dataset(tmp_path, ["gan_dataset"], cohort, 2)
+
+    assert set(selected) == {"LIDC-IDRI", "4D-Lung"}
+    assert all(len(patient_ids) == 2 for patient_ids in selected.values())
+    assert {row["dataset"] for row in details} == set(selected)
 
 
 def test_subset_is_identical_in_fresh_processes_with_different_hash_seeds(tmp_path):
@@ -100,8 +127,8 @@ def test_subset_is_identical_in_fresh_processes_with_different_hash_seeds(tmp_pa
     source = tmp_path / "source"
     source.mkdir()
     (source / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,File Location\n" +
-        "".join(f"s{i},p{i},study,CT,./missing\n" for i in range(20)), encoding="utf-8")
+        "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n" +
+        "".join(f"s{i},source,p{i},study,CT,./missing\n" for i in range(20)), encoding="utf-8")
     script = (
         "import json,sys; from types import SimpleNamespace; "
         "from lib.data.inventory import select_subset_by_dataset; "
@@ -126,9 +153,9 @@ def test_subset_limits_inventory_before_enumerating_unselected_patient_paths(tmp
     (chosen / "one.dcm").write_bytes(b"fixture")
     (unselected / "two.dcm").write_bytes(b"fixture")
     (root / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
-        "chosen-series,included,study,CT,1,./chosen\n"
-        "unselected-series,other,study,CT,1,./unselected\n", encoding="utf-8"
+        "Series UID,Collection,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        "chosen-series,source,included,study,CT,1,./chosen\n"
+        "unselected-series,source,other,study,CT,1,./unselected\n", encoding="utf-8"
     )
     cohort = CohortStub()
     cohort.memberships = {"included": ("synthetic_train.txt",), "other": ("synthetic_train.txt",)}
@@ -150,9 +177,9 @@ def test_subset_does_not_abort_on_external_index_rows_but_full_run_does(tmp_path
     chosen.mkdir(parents=True)
     (chosen / "one.dcm").write_bytes(b"fixture")
     (root / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,File Location\n"
-        "extra,outside,study,CT,./nonexistent\n"
-        "chosen,included,study,CT,./chosen\n", encoding="utf-8")
+        "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n"
+        "extra,source,outside,study,CT,./nonexistent\n"
+        "chosen,source,included,study,CT,./chosen\n", encoding="utf-8")
     cohort = CohortStub()
     cohort.subset_by_dataset = {"source": {"included"}}
     audit = DicomAudit()
@@ -219,8 +246,8 @@ def test_annotation_excludes_series_before_enumerating_its_dicom_paths(tmp_path,
     root = tmp_path / "source"
     root.mkdir()
     (root / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
-        "series-x,included,study,CT,100000,./not-present\n", encoding="utf-8"
+        "Series UID,Collection,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        "series-x,source,included,study,CT,100000,./not-present\n", encoding="utf-8"
     )
     audit = DicomAudit()
     cohort = CohortStub()
@@ -265,6 +292,7 @@ def test_loader_constructs_only_authorized_frozen_series(tmp_path, monkeypatch):
     assert len(calls) == 2
     assert len(dataset["included"]["cts"]) == 2
     assert all("external" not in row["path"] for row in dataset.audit.files)
+    assert all(row["dataset"] == "x" for row in dataset.audit.files + dataset.audit.series)
 
 
 def test_explicit_negative_view_annotation_is_not_a_header_fallback():
@@ -285,8 +313,8 @@ def test_missing_uid_stays_null_instead_of_becoming_a_directory_path(tmp_path):
     directory.mkdir()
     (directory / "slice.dcm").write_bytes(b"fixture")
     (tmp_path / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,Number of Images,File Location\n"
-        ",included,study,CT,,./series\n", encoding="utf-8")
+        "Series UID,Collection,Subject ID,Study UID,Modality,Number of Images,File Location\n"
+        ",source,included,study,CT,,./series\n", encoding="utf-8")
     audit = DicomAudit()
     result = list(read_authorized_index(tmp_path, CohortStub(), {}, audit))
     assert result[0]["metadata"]["series_instance_uid"] is None
@@ -294,14 +322,18 @@ def test_missing_uid_stays_null_instead_of_becoming_a_directory_path(tmp_path):
     assert result[0]["metadata"]["number_of_images_indexed"] is None
 
 
-def test_conflicting_csv_directory_ownership_is_blocked_before_enumeration(tmp_path):
+@pytest.mark.parametrize(("series", "collection", "message"), [
+    ("b", "source", "Conflicting collection index"),
+    ("a", "other", "Conflicting Collection"),
+])
+def test_conflicting_csv_directory_ownership_is_blocked_before_enumeration(tmp_path, series, collection, message):
     (tmp_path / "series").mkdir()
     (tmp_path / "metadata.csv").write_text(
-        "Series UID,Subject ID,Study UID,Modality,File Location\n"
-        "a,included,study,CT,./series\n"
-        "b,included,study,CT,./series\n", encoding="utf-8")
+        "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n"
+        "a,source,included,study,CT,./series\n"
+        f"{series},{collection},included,study,CT,./series\n", encoding="utf-8")
     audit = DicomAudit()
-    with pytest.raises(ValueError, match="Conflicting collection index"):
+    with pytest.raises(ValueError, match=message):
         list(read_authorized_index(tmp_path, CohortStub(), {}, audit))
     assert audit.files == []
 
@@ -310,6 +342,17 @@ def test_missing_csv_columns_fail_explicitly_without_directory_scanning(tmp_path
     (tmp_path / "metadata.csv").write_text("wrong,columns\nx,y\n", encoding="utf-8")
     with pytest.raises(ValueError, match="lacks columns"):
         list(read_authorized_index(tmp_path, CohortStub(), {}, DicomAudit()))
+
+
+@pytest.mark.parametrize("collection", ["", "   "])
+def test_empty_collection_fails_in_inventory_and_subset(tmp_path, collection):
+    (tmp_path / "metadata.csv").write_text(
+        "Series UID,Collection,Subject ID,Study UID,Modality,File Location\n"
+        f"series,{collection},included,study,CT,./missing\n", encoding="utf-8")
+    with pytest.raises(ValueError, match=r"Collection is missing at .*metadata.csv:2"):
+        list(read_authorized_index(tmp_path, CohortStub(), {}, DicomAudit()))
+    with pytest.raises(ValueError, match=r"Collection is missing at .*metadata.csv:2"):
+        select_subset_by_dataset(tmp_path.parent, [tmp_path.name], CohortStub(), 1)
 
 
 def test_cached_header_access_does_not_reload_pixeldata(tmp_path, monkeypatch):
