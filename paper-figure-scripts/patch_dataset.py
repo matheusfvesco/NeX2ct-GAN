@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import tempfile
 from pathlib import Path
 from typing import Iterable
 
@@ -33,26 +35,11 @@ def copy_h5(
 ):
     target_names = {"xray1", "xray2"}
     for name in fin:
-        try:
-            if replace_xrays and name == "real_xray1":
-                logging.debug("Renaming real_xray1 -> xray1 in %s", out_path)
-                fin.copy("real_xray1", fout, name="xray1")
-            elif replace_xrays and name == "real_xray2":
-                logging.debug("Renaming real_xray2 -> xray2 in %s", out_path)
-                fin.copy("real_xray2", fout, name="xray2")
-            else:
-                if replace_xrays and name in target_names:
-                    logging.debug(
-                        "Skipping input name '%s' to avoid collision in %s",
-                        name,
-                        out_path,
-                    )
-                    continue
-                fin.copy(name, fout)
-        except Exception as exc:
-            logging.warning(
-                "Failed to copy '%s' from %s -> %s: %s", name, in_path, out_path, exc
-            )
+        if replace_xrays and name in target_names:
+            continue
+        fin.copy(name, fout)
+        if replace_xrays and name in {"real_xray1", "real_xray2"}:
+            fin.copy(name, fout, name=name.removeprefix("real_"))
 
 
 def process_file(
@@ -63,30 +50,28 @@ def process_file(
     """
     logging.debug("Processing '%s'", in_path)
 
-    processed_pure = False
-    processed_mixed = False
-
     with h5py.File(in_path, "r") as fin:
         has_rx1 = "real_xray1" in fin
         has_rx2 = "real_xray2" in fin
         replace_xrays = has_rx1 and has_rx2
 
-        if replace_xrays:
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            with h5py.File(out_path, "w") as fout:
-                copy_h5(fin, fout, True, in_path, out_path)
-            logging.info("Wrote patched pure file: %s", out_path)
-            processed_pure = True
-        else:
+        if not replace_xrays:
             logging.info("Skipping pure patch for '%s' (missing real_xray1/2)", in_path)
+        destinations = [out_path, mixed_out_path] if replace_xrays else [mixed_out_path]
+        for destination in destinations:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary_name = tempfile.mkstemp(prefix=".patch_", suffix=".h5", dir=destination.parent)
+            os.close(fd)
+            temporary = Path(temporary_name)
+            try:
+                with h5py.File(temporary, "w") as fout:
+                    copy_h5(fin, fout, replace_xrays, in_path, destination)
+                os.replace(temporary, destination)
+            finally:
+                temporary.unlink(missing_ok=True)
+            logging.info("Wrote patched file: %s", destination)
 
-        mixed_out_path.parent.mkdir(parents=True, exist_ok=True)
-        with h5py.File(mixed_out_path, "w") as fout:
-            copy_h5(fin, fout, replace_xrays, in_path, mixed_out_path)
-        logging.info("Wrote patched mixed file: %s", mixed_out_path)
-        processed_mixed = True
-
-    return processed_pure, processed_mixed
+    return replace_xrays, True
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -2,7 +2,7 @@ from lib.datasets import RealCT, SyntheticCT
 import pytest
 from lib.transforms import Normalize
 
-@pytest.mark.parametrize("set",["splits/test_real.txt", "splits/train_real.txt"])
+@pytest.mark.parametrize("set",["splits/real_test.txt", "splits/real_train.txt"])
 def test_real_dataset(set):
     dataset = RealCT(
         data_root="preprocess/GAN-dataset",
@@ -33,7 +33,7 @@ def test_real_dataset(set):
         assert xr2.max() == 1.0
         assert xr2.min() == 0.0
 
-@pytest.mark.parametrize("set",["splits/test_synthetic.txt", "splits/train_synthetic.txt"])
+@pytest.mark.parametrize("set",["splits/synthetic_test.txt", "splits/synthetic_train.txt"])
 def test_synthetic_dataset(set):
     dataset = SyntheticCT(
         data_root="preprocess/GAN-dataset",

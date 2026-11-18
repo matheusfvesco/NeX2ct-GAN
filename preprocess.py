@@ -15,8 +15,10 @@ from lib.data.dicom import DicomDataset
 from lib.logging import setup_logger
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime, timezone
 from tqdm import tqdm
 import csv
+import hashlib
 
 
 def main():
@@ -38,6 +40,7 @@ def main():
     dataset = DicomDataset(
         root_dir=DATA_ROOT, accepted_datasets=DATASETS, logger=logger
     )
+    run_id = datetime.now(timezone.utc).isoformat()
 
     dataset.load()
 
@@ -149,6 +152,19 @@ def main():
 
     # filters dataset
     dataset.filter_dataset()
+    source_root = Path(__file__).resolve().parent
+    selection_context = {
+        "annotation_path": dataset.selection_annotation_path,
+        "annotation_sha256": dataset.selection_annotation_sha256,
+        "datasets": list(DATASETS), "compression": "lzf", "seed": None,
+        "selection_policy": "unchanged_legacy_ordering_and_multiview_preference",
+        "processing_source_sha256": {
+            name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
+            for name in ("preprocess.py", "lib/dicom.py", "lib/io.py", "lib/data/dicom.py",
+                         "lib/data/cohort.py", "lib/data/audit.py", "lib/data/temporal.py", "lib/data/respiratory.py",
+                         "lib/utils/dicom.py", "lib/process/preprocess.py", "lib/process/drr.py")
+        },
+    }
 
     # Prints and writes Patient and basic data availability for each patient on disk
     # after filtering them.
@@ -257,6 +273,9 @@ def main():
     logger.debug("Finished!\n\n")
 
     writing_progress_bar = tqdm(total=len(list(dataset.keys())))
+    processing_failures = []
+    if hashlib.sha256(Path(dataset.selection_annotation_path).read_bytes()).hexdigest() != dataset.selection_annotation_sha256:
+        raise ValueError("Original patient selection annotations changed before generation; processing blocked")
 
     logger.info("Writing dataset to disk in hdf5 format...")
     for patient in dataset:
@@ -267,6 +286,9 @@ def main():
         writing_progress_bar.update()
         if not dataset[patient]["cts"]:
             logger.debug("No CT scans found for this patient. Skipping...")
+            row = dataset.audit.patients_by_id.get(patient)
+            if row is not None:
+                row.update(processing_status="not_attempted", processing_reason="no_ct")
             continue
 
         patient_output_file = SAVE_ROOT / patient / "ct_xray_data.h5"
@@ -274,20 +296,35 @@ def main():
             patient_output_file.exists()
         ):  # if the file already exists, skip it to avoid overwriting
             logger.debug(f"'{patient_output_file}' already exists. Skipping...")
+            row = dataset.audit.patients_by_id.get(patient)
+            if row is not None:
+                row.update(processing_status="existing_output_not_verified", output_path=str(patient_output_file),
+                           metadata_status="not_verified")
             continue
         logger.debug("Writing patient data to disk...")
         try:
             # passes logger tool to the storer
-            PatientDataStorer(
+            storer = PatientDataStorer(
                 patient_id=patient,
                 patient_data_dictionary=dataset[patient],
                 logger=logger,
-            ).store_to_file(dirpath=SAVE_ROOT, compression="lzf")
+            )
+            storer.audit = dataset.audit
+            storer.run_id = run_id
+            storer.selection_context = selection_context
+            storer.store_to_file(dirpath=SAVE_ROOT, compression="lzf")
             logger.debug("Finished writing patient data to disk.")
         except Exception as e:
             logger.error(
                 f"An exception ocurred while processing the patient. Exception: {e}"
             )
+            processing_failures.append(patient)
+            row = dataset.audit.patients_by_id.get(patient)
+            if row is not None:
+                row.update(processing_status="processing_failed", processing_error=str(e))
+            for row in dataset.audit.series_by_patient[patient] + dataset.audit.files_by_patient[patient]:
+                if row.get("selection_status") == "selected":
+                    row.update(processing_status="processing_failed")
 
         logger.debug("Clearing cache...")
         ct_scans: list[CTScanDirectory] = dataset[patient]["cts"]
@@ -349,6 +386,37 @@ def main():
         logger.debug(f"{count}: {counts[count]}")
     logger.debug("Finished!\n\n")
 
+    try:
+        reference_unchanged = hashlib.sha256(Path(dataset.selection_annotation_path).read_bytes()).hexdigest() == dataset.selection_annotation_sha256
+    except OSError:
+        reference_unchanged = False
+    selection_preservation = {**dataset.selection_preservation, "reference_bytes_unchanged": reference_unchanged}
+    if not reference_unchanged:
+        selection_preservation["status"] = "blocked_reference_changed"
+    dataset.audit.persist_run_report(
+        {
+            "schema_version": 1,
+            "run_id": run_id,
+            "status": "blocked_reference_changed" if not reference_unchanged else (
+                "partially_succeeded" if processing_failures else "succeeded"
+            ),
+            "processing_failures": sorted(processing_failures),
+            "selection_context": selection_context,
+            "inventory_complete": True,
+            "selection": {
+                "annotation_path": str((DATA_ROOT / "patient-selection-annotation.json").resolve()),
+                "annotation_sha256": dataset.selection_annotation_sha256,
+                "patients": [
+                    {"patient_id": patient, "annotation": status}
+                    for patient, status in sorted(dataset.selection_annotations.items())
+                ],
+            },
+            "source_root": str(DATA_ROOT.resolve()),
+            "output_root": str(SAVE_ROOT.resolve()),
+            "selection_preservation": selection_preservation,
+        },
+        SAVE_ROOT.parent / "audit",
+    )
     logger.info("Preprocessing finished!")
 
 

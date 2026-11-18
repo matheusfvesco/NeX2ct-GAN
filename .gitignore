@@ -8,6 +8,7 @@ wheels/
 
 # Virtual environments
 .venv
+venv/
 
 *.pyc
 *.csv
@@ -33,3 +34,11 @@ wheels/
 
 .ruff_cache
 .hypothesis
+
+# Universal generated and editor files
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/

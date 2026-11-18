@@ -9,9 +9,9 @@ from lib.dicom import (
     MultiviewXRayDirectory,
 )
 from lib.logging import setup_logger
+from lib.data.audit import DicomAudit
 import os
 import csv
-import json
 
 
 class DicomDataset:
@@ -29,6 +29,9 @@ class DicomDataset:
         self.accepted_datasets = accepted_datasets
         self.dataset = None
         self.logger = logger if logger is not None else setup_logger("preprocess")
+        self.audit = DicomAudit()
+        self.selection_annotations = {}
+        self._audit_root = self.root_dirpath.absolute()
 
     def __iter__(self):
         return iter(self.dataset.keys())
@@ -54,6 +57,7 @@ class DicomDataset:
         Loads the DICOM dataset into memory.
         """
         self.logger.info("Creating dataset dictionary...")
+        self.audit = DicomAudit()
         self.dataset = defaultdict(self._create_default_patient_dict)
 
         datasets_bar = tqdm(self.accepted_datasets)
@@ -72,8 +76,10 @@ class DicomDataset:
                 #self.logger.warning(
                 #    f"Begiinning processing directory '{dirpath}' with {len(dcm_paths)} DICOM files"
                 #)
+                patient_id = None
                 try:
                     directory = DicomDirectory(dirpath)
+                    directory.source_root = self._audit_root
                     patient_id: str = directory.dataset_agnostic_patient_id
                     if directory.is_multiview:
                         self[patient_id]["multiview"].append(directory)
@@ -86,10 +92,111 @@ class DicomDataset:
                     self.logger.warning(
                         f"Error processing directory '{dirpath}' with {len(dcm_paths)} DICOM files: {e}"
                     )
+                    failure = {
+                        "stage": "directory_classification",
+                        "exception_type": type(e).__name__,
+                        "message": str(e),
+                    }
+                    self.audit.add_series(
+                        path=str(Path(dirpath).absolute()),
+                        patient_id=patient_id,
+                        expected_patient=patient_id is not None,
+                        dataset=dataset_name,
+                        file_paths=[],
+                        file_count=len(dcm_paths),
+                        files_not_verified=len(dcm_paths),
+                        read_status="read_failed",
+                        metadata_status="not_verified",
+                        eligibility_status="blocked",
+                        selection_status="not_evaluated",
+                        reason="directory_classification_failed",
+                        errors=[failure],
+                    )
                     continue
+                # Observational failures must never enter the classification/exclusion path.
+                try:
+                    self._record_directory_inventory(directory, dirpath, dataset_name, dcm_paths, patient_id)
+                except Exception as exc:
+                    self.audit.errors.append({
+                        "stage": "metadata_capture", "path": str(dirpath),
+                        "patient_id": patient_id, "exception_type": type(exc).__name__,
+                        "message": str(exc),
+                    })
+                    self.logger.warning(f"Audit metadata unavailable for '{dirpath}': {exc}")
             single_dataset_bar.close()
         self.logger.info("Success!\n\n")
         datasets_bar.close()
+
+    def _record_directory_inventory(self, directory, dirpath, dataset_name, dcm_paths, patient_id):
+        header = directory.header
+        representative_path = str(Path(directory.representative_path).absolute())
+        is_ct = str(header.get("Modality") or "").upper() == "CT"
+        from lib.data.temporal import observe_ct_series_header, observe_dataset
+        if is_ct:
+            paths = []
+            observed = {}
+            observation = observe_ct_series_header(header, Path(dirpath).absolute())
+        else:
+            observed = {row["path"]: row for row in getattr(directory, "observed_sources", [])}
+            paths = list(dict.fromkeys([representative_path, *observed]))
+            observation = observe_dataset(header, representative_path)
+        file_count = len(directory._paths_to_dicom_files)
+        retained = any(item is directory for items in self.dataset.get(patient_id, {}).values() for item in items)
+        series = self.audit.add_series(
+            path=str(Path(dirpath).absolute()), patient_id=patient_id, expected_patient=True,
+            root_id="dicom_root", root_path=str(self._audit_root),
+            relative_path=str(Path(dirpath).absolute().relative_to(self._audit_root)),
+            dataset=dataset_name, collection=str(directory.dataset),
+            role="ct_series" if is_ct else "radiographic_series",
+            modality=str(header.get("Modality") or "").upper(),
+            study_instance_uid=observation.get("study_instance_uid"),
+            series_instance_uid=observation.get("series_instance_uid"),
+            representative_file_path=None if is_ct else representative_path,
+            file_paths=paths, file_count=file_count,
+            file_paths_scope="series_record" if is_ct else "observed_images_only",
+            instance_count_observed=file_count if is_ct else None,
+            metadata_scope=observation.get("temporal_scope", "representative_image_header"),
+            eligibility_status="eligible" if retained else "ineligible",
+            selection_status="not_evaluated" if retained else "excluded",
+            reason=None if retained else "legacy_technical_criteria",
+        )
+        series["source_metadata"] = observation
+        series.update(read_status="read_ok", metadata_status="observed")
+        if is_ct:
+            series["series_summary"] = {
+                "status": "not_montaged_during_normal_processing",
+                "instance_count_observed": file_count,
+                "instance_count_used": None,
+                "instance_count_discarded": None,
+                "discard_reason_counts": {},
+                "assembly_rule": None,
+            }
+        for path in paths:
+            row = self.audit.add_file(
+                path=path, relative_path=str(Path(path).relative_to(self._audit_root)),
+                dataset=dataset_name, collection=str(directory.dataset),
+                modality=str(header.get("Modality") or "").upper(), patient_id=patient_id,
+                expected_patient=True, study_instance_uid=None, series_instance_uid=None,
+                sop_instance_uid=None, read_status="indexed", eligibility_status=series["eligibility_status"],
+                selection_status=series["selection_status"], metadata_status="not_verified",
+                selection_reason=series["reason"],
+            )
+            source = observed.get(path)
+            if source is not None:
+                row.update(
+                    read_status="read_ok", study_instance_uid=source["study_instance_uid"],
+                    series_instance_uid=source["series_instance_uid"], sop_instance_uid=source["sop_instance_uid"],
+                    metadata_status="observed", source_metadata=source,
+                    temporal=source["temporal"], field_status=source["field_status"],
+                    respiratory_evidence=source["respiratory_evidence"],
+                )
+        series["file_paths"] = paths
+        patient_row = self.audit.patients_by_id.get(patient_id)
+        if patient_row is None:
+            self.audit.add_patient(patient_id=patient_id, dataset=dataset_name,
+                                   collections=[str(directory.dataset)], selection_status="not_evaluated")
+        elif str(directory.dataset) not in patient_row.setdefault("collections", []):
+            patient_row["collections"].append(str(directory.dataset))
 
     def filter_dataset(self):
         """
@@ -99,8 +206,12 @@ class DicomDataset:
             raise ValueError("The dataset haven't been loaded yet")
         self.logger.info("Filtering invalid CTs and sorting by the amount of slices...")
 
-        with open("data/patient-selection-annotation.json") as f:
-            selection_annotations: dict = json.load(f)
+        annotation_path = Path("data/patient-selection-annotation.json")
+        from lib.data.cohort import read_original_annotations, verify_patient_membership
+        selection_annotations, self.selection_annotation_sha256 = read_original_annotations(annotation_path)
+        self.selection_annotations = selection_annotations
+        self.selection_annotation_path = str(annotation_path.resolve())
+        discovered_patient_ids = tuple(self.keys())
         dataset_bar = tqdm(sorted(self.keys()))
         for patient in dataset_bar:
             dataset_bar.set_description(patient)
@@ -110,11 +221,14 @@ class DicomDataset:
             ):
                 raise ValueError(f"The dataset {patient} is empty")
             if patient not in selection_annotations.keys():
+                self._record_patient_selection(patient, "not_selected", "missing_selection_annotation")
                 del self[patient]
                 continue
             if selection_annotations[patient] != "selected":
+                self._record_patient_selection(patient, "excluded", "patient_selection_annotation")
                 del self[patient]
                 continue
+            self._record_patient_selection(patient, "selected", None)
             ct_scans: list[CTScanDirectory] = self[patient]["cts"]
             singleview_dirs: list[SingleViewXRayDirectory] = self[patient]["xrays"]
             multiview_dirs: list[MultiviewXRayDirectory] = self[patient]["multiview"]
@@ -144,6 +258,20 @@ class DicomDataset:
                 ]
         self.logger.info("Success!\n\n")
         dataset_bar.close()
+
+        self.selection_preservation = verify_patient_membership(
+            discovered_patient_ids, tuple(self.keys()), selection_annotations
+        )
+        self.selection_preservation["reference_sha256"] = self.selection_annotation_sha256
+
+    def _record_patient_selection(self, patient_id, status, reason):
+        row = self.audit.patients_by_id.get(patient_id)
+        if row is not None:
+            row.update(selection_status=status, selection_reason=reason)
+        for row in self.audit.series_by_patient[patient_id] + self.audit.files_by_patient[patient_id]:
+            row["patient_selection_status"] = status
+            if status != "selected":
+                row.update(selection_status=status, selection_reason=reason)
 
     def clear_cache(self):
         for patient in self:

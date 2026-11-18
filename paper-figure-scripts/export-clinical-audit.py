@@ -1,0 +1,302 @@
+#!/usr/bin/env python3
+"""Export one auditable clinical row per patient in the real split union."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+from pathlib import Path
+import sys
+
+import h5py
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from lib.data.clinical import validate_interventions
+from lib.data.cohort import Cohort
+from lib.data.audit import DicomAudit, write_json
+from lib.data.temporal import observed_interval
+
+
+def _read_json(path: Path, default):
+    if not path.exists():
+        return default
+    with path.open(encoding="utf-8") as stream:
+        return json.load(stream)
+
+
+def _read_hdf5_json(path: Path, key: str) -> dict | None:
+    if not path.is_file():
+        return None
+    with h5py.File(path, "r") as source:
+        if key not in source:
+            return None
+        value = source[key][()]
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    return json.loads(value)
+
+
+def _patient_hdf5_metadata(path):
+    """A missing/corrupt product is a clinical row state, never a dropped patient."""
+    if path is None:
+        return None, None, {"status": "not_requested"}
+    if not path.is_file():
+        return None, None, {"status": "missing", "path": str(path)}
+    try:
+        metadata = _read_hdf5_json(path, "metadata_json")
+        provenance = _read_hdf5_json(path, "provenance_json")
+        valid_schema = (
+            isinstance(metadata, dict) and isinstance(provenance, dict)
+            and metadata.get("schema_version") == 1
+            and provenance.get("schema_version") == 1
+        )
+        status = "available" if valid_schema else "incomplete"
+        return metadata, provenance, {"status": status, "path": str(path)}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return None, None, {"status": "unreadable", "path": str(path),
+                            "error": {"type": type(exc).__name__, "message": str(exc)}}
+
+
+def _expected_real_ids(cohort, manifest):
+    expected = set(cohort.real_ids)
+    if manifest.get("subset") is None:
+        return expected
+    active = set(manifest["active_patient_ids"])
+    if not active <= set(cohort.all_ids):
+        raise ValueError("Subset contains unauthorized patient IDs")
+    return expected & active
+
+
+def export_clinical_audit(
+    manifest_path: Path,
+    audit_path: Path,
+    events_path: Path,
+    output_dir: Path,
+    *,
+    interventions_path: Path | None = None,
+    hdf5_root: Path | None = None,
+) -> list[dict]:
+    manifest = _read_json(manifest_path, {})
+    if "samples" in manifest and "files" in manifest:
+        return _export_processing_run(manifest, output_dir)
+    run_report = manifest if "selection" in manifest else None
+    if run_report is not None:
+        manifest = run_report["selection"]
+    if manifest.get("schema_version") != 1 or "splits_dir" not in manifest:
+        raise ValueError("A valid versioned selection manifest is required")
+    cohort = Cohort(manifest["splits_dir"])
+    if manifest.get("split_hashes") != {name: split.sha256 for name, split in cohort.splits.items()}:
+        raise ValueError("Splits differ from the prepared cohort")
+    audit = run_report if run_report is not None else _read_json(audit_path, {})
+    events = run_report if run_report is not None else _read_json(events_path, {})
+    interventions = _read_json(interventions_path, {}) if interventions_path else None
+    audit_patients = {row.get("patient_id"): row for row in audit.get("patients", [])}
+    event_by_patient = {}
+    for event in events.get("events", []):
+        event_by_patient.setdefault(event.get("patient_id"), []).append(event)
+    real_ids = {
+        item["patient_id"]
+        for item in manifest.get("patients", [])
+        if any(name.startswith("real_") for name in item.get("memberships", []))
+    }
+    if real_ids != _expected_real_ids(cohort, manifest):
+        raise ValueError("Manifest real population does not match the authoritative splits")
+    intervention_by_id = validate_interventions(interventions, real_ids)
+    real_rows = [item for item in manifest.get("patients", []) if item.get("patient_id") in real_ids]
+    if len({item["patient_id"] for item in real_rows}) != len(real_rows):
+        raise ValueError("Selection manifest contains duplicate clinical patient IDs")
+
+    rows = []
+    for item in manifest.get("patients", []):
+        memberships = item.get("memberships", [])
+        if not any(name.startswith("real_") for name in memberships):
+            continue
+        selected = item.get("selected") or {}
+        intervals = {
+            f"{role}_minus_ct": observed_interval(
+                selected.get("ct"), selected.get(role), item.get("comparability_evidence")
+            ) for role in ("frontal", "lateral")
+        }
+        intervention = intervention_by_id[item["patient_id"]]
+        selected_timestamps = [selected.get(role) for role in ("ct", "frontal", "lateral")]
+        respiratory = item.get("respiratory_evidence", {})
+        respiratory_statuses = {
+            evidence.get("status")
+            for role_data in respiratory.values()
+            for evidence in (role_data.get("evidence", []) if isinstance(role_data, dict) else role_data)
+        }
+        real_destination = next((name.removesuffix(".txt") for name in memberships if name.startswith("real_")), None)
+        h5_path = hdf5_root / "real" / real_destination / item["patient_id"] / "ct_xray_data.h5" if hdf5_root and real_destination else None
+        metadata, provenance, hdf5_status = _patient_hdf5_metadata(h5_path)
+        row = {
+            "patient_id": item["patient_id"],
+            "memberships": memberships,
+            "selection_status": item.get("status"),
+            "selection_policy": item.get("policy", item.get("requested_policy")),
+            "fallback_reason": item.get("fallback_reason"),
+            "ct": selected.get("ct"),
+            "frontal": selected.get("frontal"),
+            "lateral": selected.get("lateral"),
+            "intervals": intervals,
+            "respiratory_evidence": item.get("respiratory_evidence", {}),
+            "annotation_conflict": item.get("annotation_conflict", False),
+            "audit_patient": audit_patients.get(item["patient_id"]),
+            "processing_events": event_by_patient.get(item["patient_id"], []),
+            "intervention": intervention,
+            "hdf5_metadata": metadata,
+            "hdf5_provenance": provenance,
+            "hdf5_status": hdf5_status,
+            "evaluability": {
+                "ct_frontal_interval": intervals["frontal_minus_ct"]["status"] == "available",
+                "ct_lateral_interval": intervals["lateral_minus_ct"]["status"] == "available",
+                "frontal_lateral_interval": False,
+                "complete_three_image_pair": bool(selected.get("ct") and selected.get("frontal") and selected.get("lateral")),
+                "all_selected_timestamps_available": bool(
+                    all(candidate and candidate.get("acquisition_datetime") is not None
+                        and candidate.get("time_status") in {"valid", "partial"} for candidate in selected_timestamps)
+                ),
+                "respiratory_evidence_available": bool(respiratory_statuses - {"unavailable", "unreadable", None}),
+                "respiratory_phase_evaluable": bool(respiratory_statuses & {"explicit_dicom", "textual_indication"}),
+                "intervention_context_assessed": intervention.get("status") != "not_assessed",
+            },
+        }
+        rows.append(row)
+
+    rows.sort(key=lambda row: row["patient_id"])
+    cohort.verify_unchanged()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "clinical_pairs.json").write_text(
+        json.dumps(rows, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    fields = (
+        "patient_id", "memberships", "selection_status", "selection_policy", "fallback_reason",
+        "ct", "frontal", "lateral", "intervals", "respiratory_evidence", "annotation_conflict", "audit_patient",
+        "processing_events", "intervention", "hdf5_metadata", "hdf5_provenance", "hdf5_status", "evaluability",
+    )
+    with (output_dir / "clinical_pairs.csv").open("w", encoding="utf-8", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: json.dumps(value, ensure_ascii=False, sort_keys=True) if isinstance(value, (dict, list)) else value for key, value in row.items()})
+
+    summary = {
+        "schema_version": 1,
+        "execution_scope": "subset" if manifest.get("subset") is not None else "full",
+        "real_patient_count": len(rows),
+        "complete_three_image_pair_count": sum(row["evaluability"]["complete_three_image_pair"] for row in rows),
+        "ct_frontal_interval_evaluable_count": sum(row["evaluability"]["ct_frontal_interval"] for row in rows),
+        "ct_lateral_interval_evaluable_count": sum(row["evaluability"]["ct_lateral_interval"] for row in rows),
+        "frontal_lateral_interval_evaluable_count": sum(row["evaluability"]["frontal_lateral_interval"] for row in rows),
+        "all_selected_timestamps_available_count": sum(row["evaluability"]["all_selected_timestamps_available"] for row in rows),
+        "respiratory_evidence_available_count": sum(row["evaluability"]["respiratory_evidence_available"] for row in rows),
+        "respiratory_phase_evaluable_count": sum(row["evaluability"]["respiratory_phase_evaluable"] for row in rows),
+        "intervention_context_assessed_count": sum(row["evaluability"]["intervention_context_assessed"] for row in rows),
+        "selection_status_counts": {},
+        "intervention_status_counts": {},
+    }
+    interval_summary = {}
+    for interval_name in ("frontal_minus_ct", "lateral_minus_ct"):
+        usable = [
+            row.get("intervals", {}).get(interval_name, {})
+            for row in rows
+            if row.get("intervals", {}).get(interval_name, {}).get("status") == "available"
+        ]
+        distributions = {}
+        for interval in usable:
+            group = f"{interval.get('unit') or 'unknown'}|{interval.get('precision') or 'unknown'}"
+            distributions.setdefault(group, []).append(interval.get("value"))
+        denominator = len(rows)
+        interval_summary[interval_name] = {
+            "usable_count": len(usable),
+            "unusable_count": denominator - len(usable),
+            "denominator": denominator,
+            "usable_proportion": len(usable) / denominator if denominator else None,
+            "distribution_by_unit_and_precision": distributions,
+        }
+    both_usable = sum(
+        row.get("intervals", {}).get("frontal_minus_ct", {}).get("status") == "available"
+        and row.get("intervals", {}).get("lateral_minus_ct", {}).get("status") == "available"
+        for row in rows
+    )
+    interval_summary["both_views"] = {
+        "usable_count": both_usable,
+        "unusable_count": len(rows) - both_usable,
+        "denominator": len(rows),
+        "usable_proportion": both_usable / len(rows) if rows else None,
+    }
+    summary["temporal_intervals"] = interval_summary
+    summary["temporal_conclusion"] = {
+        "status": "inconclusive",
+        "reason": "No scientific criterion for CT temporal defensibility was supplied",
+    }
+    for row in rows:
+        status = str(row.get("selection_status") or "unknown")
+        summary["selection_status_counts"][status] = summary["selection_status_counts"].get(status, 0) + 1
+        status = str((row.get("intervention") or {}).get("status", "not_assessed"))
+        summary["intervention_status_counts"][status] = summary["intervention_status_counts"].get(status, 0) + 1
+    (output_dir / "clinical_summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8"
+    )
+    return rows
+
+
+def _export_processing_run(report, output_dir):
+    """Export the actual preprocessing contract without reopening DICOM or HDF5."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    DicomAudit.write_csv(report, output_dir / "exams.csv", report.get("run_id"))
+    rows = []
+    for sample in report["samples"]:
+        row = dict(sample)
+        evidence = sample.get("comparability_evidence")
+        row["intervals"] = {
+            f"{role}_minus_ct": observed_interval(sample.get("ct"), sample.get(role), evidence)
+            for role in ("frontal", "lateral")
+        }
+        rows.append(row)
+    summary = {"denominator": len(rows), "analysis_stage": "processing_observations_not_final_d14",
+               "temporal_intervals": {},
+               "temporal_conclusion": {"status": "inconclusive",
+                                       "reason": "No scientific defensibility criterion supplied"}}
+    for name in ("frontal_minus_ct", "lateral_minus_ct"):
+        available = [row["intervals"][name] for row in rows
+                     if row["intervals"][name]["status"] == "available"]
+        distributions = {}
+        for interval in available:
+            key = f"{interval['unit']}|{interval['precision']}"
+            distributions.setdefault(key, []).append(interval["value"])
+        summary["temporal_intervals"][name] = {
+            "usable_count": len(available), "unusable_count": len(rows) - len(available),
+            "denominator": len(rows), "usable_proportion": len(available) / len(rows) if rows else None,
+            "distribution_by_unit_and_precision": distributions,
+        }
+    both = sum(all(value["status"] == "available" for value in row["intervals"].values()) for row in rows)
+    summary["temporal_intervals"]["both_views"] = {
+        "usable_count": both, "unusable_count": len(rows) - both, "denominator": len(rows),
+        "usable_proportion": both / len(rows) if rows else None,
+    }
+    write_json(output_dir / "clinical_pairs.json", rows)
+    write_json(output_dir / "clinical_summary.json", summary)
+    return rows
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--run", type=Path, help="Consolidated preprocessing audit/run.json")
+    parser.add_argument("--manifest", type=Path)
+    parser.add_argument("--audit", type=Path)
+    parser.add_argument("--events", type=Path)
+    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--interventions", type=Path)
+    parser.add_argument("--hdf5-root", type=Path)
+    args = parser.parse_args(argv)
+    if args.run:
+        args.manifest = args.audit = args.events = args.run
+    elif not all((args.manifest, args.audit, args.events)):
+        parser.error("provide --run, or all of --manifest, --audit and --events")
+    export_clinical_audit(args.manifest, args.audit, args.events, args.output_dir, interventions_path=args.interventions, hdf5_root=args.hdf5_root)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

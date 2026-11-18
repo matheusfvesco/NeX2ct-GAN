@@ -13,7 +13,7 @@ import numpy as np
 
 # from scipy import ndimage # for applying masks
 # from skimage import morphology # for applying masks
-from functools import wraps
+from functools import partial, wraps
 from datetime import datetime
 from abc import ABC
 
@@ -42,18 +42,24 @@ def get_middle_dicom_filedataset(func):
 
 
 # loads the file dataset if it is not already loaded
-def get_dicom_filedataset(func):
+def get_dicom_filedataset(func=None, *, header_only=False):
     """If dicom FileDataset is already loaded in object(during init), uses it.
     Otherwise, loads from disk and passes it to function
     Class meant for File classes"""
 
+    if func is None:
+        return partial(get_dicom_filedataset, header_only=header_only)
+
     @wraps(func)
     def wrapper(self, *args, **kwargs):
-        dicom = (
-            pydicom.dcmread(self.dicom_path)
-            if not self.is_dicom_cached
-            else self.cache.get("dicom")
-        )
+        if self.is_dicom_cached:
+            dicom = self.cache.get("dicom")
+        elif header_only:
+            dicom = getattr(self, "header", None)
+            if dicom is None:
+                dicom = pydicom.dcmread(self.dicom_path, stop_before_pixels=True)
+        else:
+            dicom = pydicom.dcmread(self.dicom_path)
         return func(self, dicom, *args, **kwargs)
 
     return wrapper
@@ -132,13 +138,17 @@ class BaseDicomFile(ABC):
     def __repr__(self):
         return f"{self.__class__.__name__}('{self.dicom_path}')"
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_modality(self, dicom: FileDataset) -> str:
         return dicom.Modality
 
     @get_dicom_filedataset
     def get_raw_array(self, dicom: FileDataset) -> np.ndarray:
-        """This is a test"""
+        """Capture optional metadata without another DICOM read."""
+        from lib.data.temporal import observe_dataset
+
+        if str(dicom.get("Modality") or "").upper() != "CT":
+            self.source_metadata = observe_dataset(dicom, self.dicom_path.absolute())
         return dicom.pixel_array
 
     @get_dicom_filedataset
@@ -164,11 +174,11 @@ class BaseDicomFile(ABC):
         self.rows, self.columns = self.get_image_dimensions()
         self.dataset = self.get_dataset()
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_patient_id(self, dicom: FileDataset) -> str:
         return dicom.get("PatientID")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_dataset_agnostic_patient_id(self, dicom: FileDataset) -> str:
         patient_id = str(dicom.PatientID)
 
@@ -181,11 +191,11 @@ class BaseDicomFile(ABC):
 
         return dataset_agnostic_patient_id
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_modality(self, dicom: FileDataset) -> str:
         return dicom.get("Modality")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_acquisition_datetime(self, dicom: FileDataset) -> datetime:
         acquisition_date = dicom.get("AcquisitionDate", "")
         acquisition_time = dicom.get("AcquisitionTime", "")
@@ -204,11 +214,11 @@ class BaseDicomFile(ABC):
         )
         return acquisition_datetime_parsed
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_body_part_examined(self, dicom: FileDataset) -> str:
         return dicom.get("BodyPartExamined", None)
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_windowing_information(self, dicom: FileDataset) -> tuple[int, int]:
         window_center = get_multival_by_index(dicom.get("WindowCenter"), index=0)
         window_center = (
@@ -218,23 +228,23 @@ class BaseDicomFile(ABC):
         window_center = int(window_width) if window_width is not None else window_width
         return window_center, window_width
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_rescale_information(self, dicom: FileDataset) -> tuple[int, int]:
         return dicom.get("RescaleSlope"), dicom.get("RescaleIntercept")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_photometric_interpretation(self, dicom: FileDataset) -> str:
         return dicom.get("PhotometricInterpretation")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_bits_information(self, dicom: FileDataset) -> str:
         return dicom.get("BitsAllocated"), dicom.get("BitsStored")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_image_dimensions(self, dicom: FileDataset) -> str:
         return dicom.get("Rows"), dicom.get("Columns")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_dataset(self, dicom: FileDataset) -> str:
         return dicom.get(("0013", "1010")).value
 
@@ -243,10 +253,9 @@ class BaseDicomFile(ABC):
         return dicom
 
     def _load_dicom(self, stop_before_pixels=False):
-        self.cache.add(
-            "dicom",
-            pydicom.dcmread(self.dicom_path, stop_before_pixels=stop_before_pixels),
-        )
+        header = pydicom.dcmread(self.dicom_path, stop_before_pixels=stop_before_pixels)
+        self.cache.add("dicom", header)
+        self.header = header
         return True
 
     def _unload_dicom(self):
@@ -304,8 +313,7 @@ class XRayView(BaseDicomFile):
         # original, derived, etc.
         self.image_type = self._get_image_type()
 
-    @get_dicom_filedataset
-    def get_array(self, dicom: FileDataset) -> np.ndarray:
+    def get_array(self, dicom=None) -> np.ndarray:
         """
         Returns the preprocessed array of the X Ray View
         """
@@ -313,7 +321,7 @@ class XRayView(BaseDicomFile):
 
         return processed_array
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_windowing_information(
         self, dicom: FileDataset, index: int = 0
     ) -> tuple[int, int, str]:
@@ -329,11 +337,11 @@ class XRayView(BaseDicomFile):
         class_name = classifier.classify(self.dicom_path)
         return class_name
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_view_position(self, dicom: FileDataset) -> str:
         return dicom.get("ViewPosition")
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_image_type(self, dicom: FileDataset) -> str:
         image_type = dicom.get("ImageType")  # this is a list of two itens.
         return image_type[
@@ -383,11 +391,11 @@ class CTSlice(BaseDicomFile):
         self.image_orientation_patient = self._get_image_orientation_patient()
         self.pixel_spacing: tuple[float, float] = self._get_pixel_spacing()
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def get_image_position_patient(self, dicom: FileDataset) -> tuple:
         return tuple(dicom.ImagePositionPatient)  # return (x, y, z)
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_windowing_information(
         self, dicom: FileDataset, index: int = 0
     ) -> tuple[int, int, int, int]:
@@ -401,7 +409,7 @@ class CTSlice(BaseDicomFile):
         self.slope = int(get_multival_by_index(dicom.get("RescaleSlope"), index))
         return self.window_center, self.window_width, self.intercept, self.slope
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_raw_windowing_information(
         self, dicom: FileDataset
     ) -> tuple[int, int, int, int]:
@@ -412,22 +420,21 @@ class CTSlice(BaseDicomFile):
         return window_center, window_width, intercept, slope
 
     @property
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def has_windowing_information(self, dicom: FileDataset):
         tags = ["WindowCenter", "WindowWidth", "RescaleIntercept", "RescaleSlope"]
         return all(dicom.get(tag) is not None for tag in tags)
         # check if all these tags are not None and return either True or False
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_image_orientation_patient(self, dicom: FileDataset):
         return dicom.get("ImageOrientationPatient", None)
 
-    @get_dicom_filedataset
+    @get_dicom_filedataset(header_only=True)
     def _get_pixel_spacing(self, dicom: FileDataset) -> tuple[float, float]:
         return tuple(map(float, dicom.PixelSpacing))
 
-    @get_dicom_filedataset
-    def get_array(self, dicom: FileDataset) -> np.ndarray:
+    def get_array(self, dicom=None) -> np.ndarray:
         # processed_array = self._preprocess_array(dicom=dicom)
 
         return self.get_raw_array()
@@ -532,7 +539,10 @@ class BaseDicomDir(ABC):
     def __getitem__(self, index):
         if isinstance(index, slice):
             raise ValueError("This class doesn't support slicing")
-        return DicomFile(self._paths_to_dicom_files[index])
+        dicom = DicomFile(self._paths_to_dicom_files[index])
+        if hasattr(self, "source_root"):
+            dicom.source_root = self.source_root
+        return dicom
 
     def __str__(self):
         return f"{self.__class__.__name__}(directory_path={self.path_directory}, dir_type={self.dir_type})"
@@ -546,7 +556,10 @@ class BaseDicomDir(ABC):
         """
         # Return a generator that yields DICOM files loaded by the ThreadPoolExecutor
         for path in self._paths_to_dicom_files:
-            yield DicomFile(path)
+            dicom = DicomFile(path)
+            if hasattr(self, "source_root"):
+                dicom.source_root = self.source_root
+            yield dicom
 
     def __eq__(self, other):
         if isinstance(other, self.__class__):
@@ -594,7 +607,10 @@ class BaseDicomDir(ABC):
         return True
 
     def _load_dicom(self) -> bool:
-        self.cache.add("dicom", self.get_middle_dcm())
+        representative = self.get_middle_dcm()
+        self.cache.add("dicom", representative)
+        self.representative_path = str(representative.dicom_path)
+        self.header = representative.header
         return True
 
     # Processing after loading data
@@ -861,13 +877,14 @@ class CTScanDirectory(BaseDicomDir):
             dicoms = [pydicom.dcmread(path) for path in self._paths_to_dicom_files]
         else:
             files = sorted(
-                [path for path in self._paths_to_dicom_files],
+                self._paths_to_dicom_files,
                 key=lambda x: x.name,
                 reverse=reverse_order,  # should usually order in "0, 1, 2", and if reversed, "2, 1, 0"
             )
             dicoms = [pydicom.dcmread(path) for path in files]
 
         # filters arrays to only arrays with shape 512x512
+        loaded_count = len(dicoms)
         dicoms = [
             dicom
             for dicom in dicoms
@@ -878,15 +895,36 @@ class CTScanDirectory(BaseDicomDir):
         if use_z_ordering:
             dicoms = sorted(
                 dicoms,
-                key=lambda x: tuple(x.get("ImagePositionPatient"))[2],
+                key=lambda dicom: tuple(dicom.get("ImagePositionPatient"))[2],
                 # this should usually order in "2, 1, 0" and if reversed "0, 1, 2"
                 reverse=not reverse_order,
             )
 
+        self.series_summary = self._record_series_summary(
+            loaded_count, len(dicoms), use_z_ordering, reverse_order
+        )
         arrays = [dicom.pixel_array for dicom in dicoms]
 
         array = np.stack(arrays, axis=-1)
         return array
+
+    @staticmethod
+    def _record_series_summary(loaded_count, used_count, use_z_ordering, reverse_order):
+        if use_z_ordering:
+            assembly_rule = "image_position_patient_z_ascending" if reverse_order else "image_position_patient_z_descending"
+        else:
+            assembly_rule = "filename_descending" if reverse_order else "filename_ascending"
+        discarded = max(0, loaded_count - used_count)
+        return {
+            "instance_count_observed": loaded_count,
+            "instance_count_used": used_count,
+            "instance_count_discarded": discarded,
+            "discard_reason_counts": {"slice_dimensions_not_512x512": discarded} if discarded else {},
+            "assembly_rule": assembly_rule,
+            "tie_break_rule": "stable_existing_directory_order" if use_z_ordering else "filename_order",
+            "dimension_filter": {"rows": 512, "columns": 512},
+            "temporal_reference_policy": "representative_header_applies_to_series",
+        }
 
     def _get_array(self) -> np.ndarray:
         array = self._get_raw_array()
@@ -1117,6 +1155,8 @@ class MultiviewXRayDirectory(BaseDicomDir):
         value is a list of the filepaths that refer to that view_type
         """
         views: list[XRayView] = [view for view in self]
+        from lib.data.temporal import observe_dataset
+        self.observed_sources = [observe_dataset(view.header, view.dicom_path.absolute()) for view in views]
 
         # maps each filepath to a view_type value
         self.filenames_to_view_type = {
