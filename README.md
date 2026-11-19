@@ -112,3 +112,16 @@ python paper-figure-scripts/split_samples.py output/preprocess/GAN-dataset-compl
 ```bash
 python paper-figure-scripts/split_samples.py output/preprocess/GAN-dataset-complete-real splits real 0.1
 ```
+
+To audit and regenerate patient-level splits from the versioned references with reproducible, stratified quotas while treating the X2CT lists as fixed references, run:
+
+```bash
+python paper-figure-scripts/split_samples.py audit \
+    --reference-dir splits \
+    --output-dir splits/reprocessed \
+    --report reports/split-audit.md \
+    --conflicts reports/split-conflicts.json
+```
+
+This preserves the real-X-ray/no-real-X-ray test quotas and leaves all eight reference lists unchanged. To also reproduce the original seed-42 attempt in the audit JSON, provide both `--real-root` and `--derived-root` pointing to the corresponding HDF5 inventories.
+The output directory must be empty; use a new destination for each subsequent audit run.
